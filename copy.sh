@@ -34,6 +34,19 @@
 #     consolidation or tests.
 #   - Consider modularizing remaining app-specific tweaks/prompts.
 
+# This script is bash-only (BASH_SOURCE, shopt, [[ ]], arrays).
+# If it is launched with another shell - e.g. `zsh copy.sh --express-upgrade`
+# or `sh copy.sh` - re-exec it under bash. zsh in particular aborts the whole
+# script on an unmatched glob (`nomatch`), which the optional Qt QML probes in
+# scripts/lib_detect.sh can trigger on systems without those paths.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if [ -f "$0" ] && command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  printf '%s\n' "[ERROR] copy.sh must be run with bash (e.g. 'bash ./copy.sh --express-upgrade')." >&2
+  exit 1
+fi
+
 clear
 wallpaper=${XDG_CONFIG_HOME:-$HOME/.config}/hypr/wallpaper_effects/.wallpaper_current
 # Defaults updated to normalized names
@@ -780,6 +793,9 @@ if is_nixos; then
 else
   install_waybar_weather "$LOG"
 fi
+# butterpal is optional: the palette source defaults to wallust, and this
+# helper skips NixOS on its own because the asset cannot run there.
+install_butterpal_binary "$LOG"
 ensure_oh_my_zsh "$LOG"
 printf "\n%.0s" {1..1}
 
@@ -830,7 +846,7 @@ elif [ "$resolution" == "≥ 1440p" ]; then
 fi
 
 printf "\n%.0s" {1..1}
-prompt_clock_12h "$LOG"
+prompt_clock_format "$LOG"
 printf "\n%.0s" {1..1}
 
 # Upgrade/express: confirm Hyprlang -> Lua migration (default yes).
@@ -855,6 +871,18 @@ fi
 seed_upgrade_userconfigs "$LOG"
 capture_upgrade_runtime_selection_state
 capture_runtime_personal_state "$LOG"
+
+# Waybar reloads from the files this script is about to replace, and exits when
+# the file it is watching is gone: copy_waybar removes the waybar directory that
+# holds `config` and `style.css`, copy_phase2 moves the whole hypr tree aside for
+# the fresh copy, and the waybar.service block below stops a bar that a distro
+# runs through systemd. Nothing here ever brought the bar back, so the session
+# was left without one. Remember whether there was a bar to restore; the restart
+# itself happens once the installed config and style are final.
+waybar_was_running=0
+if pgrep -x waybar >/dev/null 2>&1 || pgrep -x '\.waybar-wrapped' >/dev/null 2>&1; then
+  waybar_was_running=1
+fi
 
 printf "${INFO} - copying dotfiles ${SKY_BLUE}first${RESET} part\n"
 copy_phase1 "$LOG" "$RUN_MODE"
@@ -1081,6 +1109,7 @@ fi
 printf "\n%.0s" {1..1}
 
 restore_hypr_assets "$LOG" "$EXPRESS_MODE"
+restore_wlogout_selection "$LOG"
 printf "\\n%.0s" {1..1}
 
 restore_user_configs "$LOG" "$EXPRESS_MODE" "$INSTALLED_VERSION_AT_START"
@@ -1222,11 +1251,16 @@ default_wallpapers_count=$(find "$SCRIPT_DIR/wallpapers" -type f 2>/dev/null | w
 WALLPAPER_BANK_MIN_FILES=$(( ${default_wallpapers_count:-0} + 15 ))
 
 download_wallpaper_bank() {
-  local clone_dir revision
+  local clone_dir revision clone_status
   clone_dir=$(mktemp -d "${TMPDIR:-/tmp}/wallpaper-bank.XXXXXX") || return 1
   trap 'rm -rf "$clone_dir"' EXIT INT TERM
 
-  if ! git clone --depth 1 --single-branch "$WALLPAPER_BANK_REPO" "$clone_dir/Wallpaper-Bank" >>"$LOG" 2>&1; then
+  # --progress draws the transfer meter even though stderr is not a terminal,
+  # and tee keeps the clone output in the log as well as on screen. The
+  # pipeline reports tee's status, so git's exit code is read from PIPESTATUS.
+  git clone --progress --depth 1 --single-branch "$WALLPAPER_BANK_REPO" "$clone_dir/Wallpaper-Bank" 2>&1 | tee -a "$LOG"
+  clone_status=${PIPESTATUS[0]}
+  if [ "$clone_status" -ne 0 ]; then
     echo "${ERROR} Downloading additional wallpapers failed" | tee -a "$LOG"
     trap - EXIT INT TERM
     rm -rf "$clone_dir"
@@ -1403,6 +1437,9 @@ if [ "$EXPRESS_MODE" -eq 1 ]; then
   echo "${NOTE} Express upgrade selected: skipping wallust run entirely." 2>&1 | tee -a "$LOG"
 elif [ "$RUN_MODE" != "install" ] && [ "${KOOLDOTS_RUNTIME_THEME_RESTORED:-0}" -eq 1 ]; then
   echo "${NOTE} Preserved existing Wallust/global theme colors from pre-upgrade state; skipping wallust regeneration." 2>&1 | tee -a "$LOG"
+elif palette_source_is_butterpal && butterpal_palette_from_image "$wallpaper"; then
+  echo "${NOTE} Generating the palette with butterpal." 2>&1 | tee -a "$LOG"
+  wallust_cs_from_palette "${wallust_args[@]}" 2>&1 | tee -a "$LOG"
 else
   wallust "${wallust_args[@]}" run -s "$wallpaper" 2>&1 | tee -a "$LOG"
 fi
@@ -1413,6 +1450,24 @@ fi
 
 # Ensure shell profile sources /etc/profile (fixes flatpak not showing in rofi on Debian)
 ensure_shell_profile_sources_etc_profile "$LOG"
+
+# Bring back the bar that the copy took down. WaybarStartup.sh owns the Waybar
+# lifecycle - one-instance lock, masked waybar.service, duplicate clean-up - so
+# exactly one bar returns with the newly installed config and style.
+if [ "$waybar_was_running" -eq 1 ]; then
+  waybar_startup="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/WaybarStartup.sh"
+  if [ -x "$waybar_startup" ]; then
+    echo "${INFO} - Restarting Waybar with the installed config..." 2>&1 | tee -a "$LOG"
+    "$waybar_startup" --restart 2>&1 | tee -a "$LOG" || true
+    if pgrep -x waybar >/dev/null 2>&1 || pgrep -x '\.waybar-wrapped' >/dev/null 2>&1; then
+      echo "${OK} - Waybar is running again." 2>&1 | tee -a "$LOG"
+    else
+      echo "${WARN} - Waybar did not come back. Run ${YELLOW}SUPER ALT R${RESET} and check ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/waybar.log" 2>&1 | tee -a "$LOG"
+    fi
+  else
+    echo "${WARN} - WaybarStartup.sh not found at $waybar_startup; start Waybar manually." 2>&1 | tee -a "$LOG"
+  fi
+fi
 
 printf "\n%.0s" {1..2}
 printf "${OK} GREAT! KooL's Hyprland-Dots is now Loaded & Ready !!! "

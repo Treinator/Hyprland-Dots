@@ -20,7 +20,9 @@ hl.config({
     default_split_ratio = 1.0,
     split_bias = 0,
     precise_mouse_move = false,
-    special_scale_factor = 0.8,
+    -- `special_scale_factor` is deprecated on Hyprland 0.57 and is flagged by
+    -- `hyprctl deprecated-config`. The special workspace is inset with a
+    -- workspace rule instead; see lua/workspaces.lua.
   },
 })
 
@@ -59,7 +61,7 @@ hl.config({
   input = {
     kb_layout = "us",
     kb_variant = "",
-    kb_model = "pc105",
+    kb_model = "",
     kb_options = "",
     kb_rules = "",
     repeat_rate = 50,
@@ -111,6 +113,46 @@ local function safe_gesture(spec)
   end
 end
 
+-- Cursor zoom helpers.
+--
+-- These gestures used `io.popen("hyprctl getoption cursor:zoom_factor")` and
+-- `hl.dsp.exec_cmd("hyprctl keyword cursor:zoom_factor ...")`. io.popen blocks
+-- the compositor's Lua VM for the whole round trip (hyprctl plus awk), so the
+-- swipe stalled the session, and `hyprctl keyword` is the legacy hyprlang form.
+-- Both are a single in-process hl.* call now, matching the mouse-wheel zoom
+-- binds in configs/system_keybinds.lua.
+local ZOOM_STEP = 1.5
+local ZOOM_MIN = 1.0
+local ZOOM_MAX = 16.0
+
+local function zoom_factor()
+  local factor = hl and hl.get_config and (hl.get_config("cursor.zoom_factor") or hl.get_config("cursor:zoom_factor"))
+
+  if type(factor) ~= "number" then
+    factor = ZOOM_MIN
+  end
+  if factor < ZOOM_MIN then
+    factor = ZOOM_MIN
+  end
+
+  return factor
+end
+
+local function set_zoom(factor)
+  if type(factor) ~= "number" then
+    return
+  end
+  if factor < ZOOM_MIN then
+    factor = ZOOM_MIN
+  elseif factor > ZOOM_MAX then
+    factor = ZOOM_MAX
+  end
+
+  if hl and hl.config then
+    hl.config({ cursor = { zoom_factor = factor } })
+  end
+end
+
 -- 3-finger horizontal swipe -> workspace switch
 safe_gesture({
   fingers = 3,
@@ -123,15 +165,7 @@ safe_gesture({
   fingers = 3,
   direction = "up",
   action = function()
-    local handle = io.popen("hyprctl getoption cursor:zoom_factor 2>/dev/null | awk 'NR==1 {factor = $2; if (factor < 1) {factor = 1}; print factor * 1.5}'")
-    if handle then
-      local factor = handle:read("*a")
-      handle:close()
-      factor = factor and factor:gsub("%s+", "")
-      if factor and factor ~= "" then
-        hl.dispatch(hl.dsp.exec_cmd("hyprctl keyword cursor:zoom_factor " .. factor))
-      end
-    end
+    set_zoom(zoom_factor() * ZOOM_STEP)
   end,
 })
 
@@ -140,15 +174,7 @@ safe_gesture({
   fingers = 3,
   direction = "down",
   action = function()
-    local handle = io.popen("hyprctl getoption cursor:zoom_factor 2>/dev/null | awk 'NR==1 {factor = $2; if (factor < 1) {factor = 1}; print factor / 1.5}'")
-    if handle then
-      local factor = handle:read("*a")
-      handle:close()
-      factor = factor and factor:gsub("%s+", "")
-      if factor and factor ~= "" then
-        hl.dispatch(hl.dsp.exec_cmd("hyprctl keyword cursor:zoom_factor " .. factor))
-      end
-    end
+    set_zoom(zoom_factor() / ZOOM_STEP)
   end,
 })
 
@@ -210,10 +236,21 @@ hl.config({
   },
 })
 
+-- Advertise the renderer's full dmabuf format list, not just the formats the
+-- display can scan out. The default (true) narrows the list to the display's
+-- scanout set; on virtio-gpu that is XRGB8888 only, so clients that need an
+-- alpha config find no matching EGLConfig. kitty (GLFW asks for
+-- EGL_ALPHA_SIZE 8) then fails with "EGL: No EGLConfigs returned".
+hl.config({
+  quirks = {
+    skip_non_kms_dmabuf_formats = false,
+  },
+})
+
 hl.config({
   cursor = {
     sync_gsettings_theme = true,
-    no_hardware_cursors =      0,
+    no_hardware_cursors =     1,
     enable_hyprcursor = true,
     warp_on_change_workspace = 2,
     no_warps = true,

@@ -15,6 +15,12 @@ iDIR="${XDG_CONFIG_HOME:-$HOME/.config}/swaync/images" # For notifications
 rofi_theme_for_this_script="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/rofi/config-kitty-theme.rasi"
 wallust_refresh_script="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/WallustSwww.sh"
 debug_log="${XDG_CACHE_HOME:-$HOME/.cache}/kooldots-kitty-themes.log"
+# Same indicator the other selection menus use. Never part of a theme name.
+MARKER="👉"
+# Signals the terminal, never a CLI invocation of it - `kitty +kitten` and
+# `kitty @` share the process name with the terminal.
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/TerminalSignal.sh"
 
 ensure_managed_kitty_config() {
   if [ -f "$user_kitty_config" ] && [ -r "$user_kitty_config" ]; then
@@ -43,6 +49,9 @@ resolve_theme_selection() {
 
   rofi_output="${rofi_output//$'\r'/}"
   rofi_output="${rofi_output//$'\n'/}"
+  # The menu is asked for an index, but a marker that reaches a name lookup
+  # would silently match nothing.
+  rofi_output="${rofi_output#"$MARKER "}"
 
   if [[ "$rofi_output" =~ ^[0-9]+$ ]] && [ "$rofi_output" -lt "${#available_theme_names[@]}" ]; then
     current_selection_index="$rofi_output"
@@ -109,7 +118,7 @@ apply_kitty_theme_to_config() {
     "$wallust_refresh_script" >/dev/null 2>&1 &
     log_debug "wallust_refresh_background_started"
   fi
-  if pidof kitty >/dev/null 2>&1; then
+  if terminal_app_pids kitty >/dev/null 2>&1; then
     if command -v kitty >/dev/null 2>&1; then
       (kitty @ load-config >/dev/null 2>&1 || true) &
     fi
@@ -118,11 +127,7 @@ apply_kitty_theme_to_config() {
         kitty @ set-colors --all --configured "$theme_file_path_to_apply" >/dev/null 2>&1 || true
       ) &
     fi
-    for pid_kitty in $(pidof kitty); do
-      if [ -n "$pid_kitty" ]; then
-        kill -SIGUSR1 "$pid_kitty"
-      fi
-    done
+    signal_terminal_app kitty SIGUSR1 >/dev/null 2>&1 || true
   fi
   return 0
 }
@@ -187,19 +192,26 @@ theme_to_preview_now="${available_theme_names[$current_selection_index]}"
 
 while true; do
 
+  # One row per theme, with the marker on the theme that is live. A preview
+  # writes the config straight away, so the marked row is the theme in effect
+  # right now and it moves with the preview.
   rofi_input_list=""
-  for theme_name_in_list in "${available_theme_names[@]}"; do
-    rofi_input_list+="$theme_name_in_list\n"
+  for i in "${!available_theme_names[@]}"; do
+    if [[ "$i" -eq "$current_selection_index" ]]; then
+      rofi_input_list+="$MARKER ${available_theme_names[$i]}"$'\n'
+    else
+      rofi_input_list+="${available_theme_names[$i]}"$'\n'
+    fi
   done
-  rofi_input_list_trimmed="${rofi_input_list%\\n}"
+  rofi_input_list_trimmed="${rofi_input_list%$'\n'}"
 
   "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/RofiFocusedWallpaperLink.sh" >/dev/null 2>&1 || true
-  chosen_selection_from_rofi=$(echo -e "$rofi_input_list_trimmed" |
+  chosen_selection_from_rofi=$(printf '%s\n' "$rofi_input_list_trimmed" |
     rofi -dmenu -i \
       -no-custom \
       -format 'i' \
       -p "Kitty Theme" \
-      -mesg "Enter: Preview | Ctrl+S (or Alt+1): Apply & Exit | Esc: Cancel" \
+      -mesg "Current: ${available_theme_names[$current_selection_index]} | Enter: Preview | Ctrl+S (or Alt+1): Apply & Exit | Esc: Cancel" \
       -config "$rofi_theme_for_this_script" \
       -selected-row "$current_selection_index" \
       -kb-custom-1 "Control+s,Control+S,Alt+1")
@@ -216,7 +228,7 @@ while true; do
         if command -v kitty >/dev/null 2>&1; then
           (kitty @ load-config >/dev/null 2>&1 || true) &
         fi
-        for pid_kitty in $(pidof kitty); do if [ -n "$pid_kitty" ]; then kill -SIGUSR1 "$pid_kitty"; fi; done
+        signal_terminal_app kitty SIGUSR1 >/dev/null 2>&1 || true
         notify_user "$iDIR/error.png" "Preview Error" "Failed to apply $theme_to_preview_now. Reverted."
         exit 1
       fi
@@ -231,7 +243,7 @@ while true; do
     if command -v kitty >/dev/null 2>&1; then
       (kitty @ load-config >/dev/null 2>&1 || true) &
     fi
-    for pid_kitty in $(pidof kitty); do if [ -n "$pid_kitty" ]; then kill -SIGUSR1 "$pid_kitty"; fi; done
+    signal_terminal_app kitty SIGUSR1 >/dev/null 2>&1 || true
     break
   elif [ $rofi_exit_code -ge 10 ] && [ $rofi_exit_code -le 28 ]; then # custom keybindings
     resolve_theme_selection "$chosen_selection_from_rofi" || true
@@ -246,9 +258,9 @@ while true; do
     if command -v kitty >/dev/null 2>&1; then
       kitty @ load-config >/dev/null 2>&1 || true
     fi
-    for pid_kitty in $(pidof kitty); do if [ -n "$pid_kitty" ]; then kill -SIGUSR1 "$pid_kitty"; fi; done
+    signal_terminal_app kitty SIGUSR1 >/dev/null 2>&1 || true
     break
   fi
-done
+ done
 
 exit 0

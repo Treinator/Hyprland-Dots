@@ -1,5 +1,980 @@
 # Changelog — KoolDots
 
+## v2.3.29
+
+## Fixed:
+
+- The network panel closes when you click outside it
+  - The card was the whole window, so there was no outside to click
+  - The window now fills the monitor while the panel is open
+  - That surface is the dismissal target; the card swallows its own clicks
+  - It collapses to a single pixel while closed, so the desktop stays clickable
+  - No dim, unlike the keybinds frame: this is a drop-down, not a modal
+  - `WlrLayershell.namespace` is set, so `hyprctl layers` names the surface
+
+- The network panel no longer opens itself
+  - `Panel.qml` started with `shown: true`
+  - Any shell (re)start showed it, including a config reload after `copy.sh`
+  - It starts hidden now, like the keybinds and wallpaper applets
+  - `QsNetworkPanel.sh` starts the shell and then opens the panel
+
+- The Waybar network module stops probing containers and Tailscale every second
+  - `status` built the whole snapshot, `docker stats` and all
+  - The module draws only the device, Wi-Fi and Bluetooth records
+  - Those probes can take longer than the second between the calls
+  - `status` uses `snapshot_status` now, the subset it actually renders
+  - `launch_panel` polls the new `ready` IPC call instead of `isOpen`
+
+- Waybar no longer disappears after `copy.sh`
+  - The copy replaces the config, style and modules a running bar watches
+  - Waybar has no way to reload from a file that is gone, so it exits
+  - `copy_phase2` moves the whole `hypr` tree aside for the fresh copy
+  - A distro that runs the bar through `waybar.service` also saw it stopped
+  - Nothing in `copy.sh` ever started the bar again
+  - A bar that was running before the copy is now restarted at the end
+  - The restart goes through `WaybarStartup.sh`, so exactly one bar returns
+  - Reported on Fedora, Arch, Debian and Ubuntu
+
+- `movetoworkspace +1` no longer moves the window to workspace 1
+  - Lua reads `"+1"` as the number `1`, so the relative move was lost
+  - Hyprland turns a Lua number back into `"1"`, an absolute workspace
+  - A signed value now stays a string, which Hyprland parses as relative
+  - Fixed in `system_keybinds.lua`, the helper and the migration template
+  - `SUPER SHIFT + ]`, `SUPER CTRL + ]` and user binds using `+1` work again
+  - Thanks to @andreineustroev for the report and the original fix
+  - PR: [#165](https://github.com/LinuxBeginnings/Hyprland-Dots/pull/165)
+
+- `user_startup.lua` is no longer broken by an installer autostart entry
+  - `enable_ags()`, `enable_asusctl()`, `enable_blueman()` matched the table
+  - That `sed` address was unanchored, so it matched the COMMENTED opener
+  - Every template before v2.3.28 ships the startup block commented out
+  - The entry then landed outside any table, which is not valid Lua
+  - The file stopped parsing, so none of its startup commands ran
+  - `user_overrides.lua` reports that as one `[WARN]`, and nothing else
+  - `lib_apps.sh` anchors the address and falls back to a live `exec_once()`
+  - `patches/91-user-startup-orphan-entry.sh` repairs the files already broken
+
+- The 24H answer at install now reaches every Waybar clock
+  - The install prompt applied 12H only, so the 24H answer changed nothing
+  - Its `sed` patterns had drifted off the modules files and matched nothing
+  - `clock`, `clock#2` and `clock#5` therefore stayed on 12H as shipped
+  - `ModulesVertical` was never edited at all
+  - `format-alt` is toggled too, so the extended display cannot disagree
+  - `clock#forest` and `clock#text` were outside the toggle entirely
+  - Both now have a 12H/24H pair and are edited with the rest
+  - The Waybar half is delegated to `ToggleWaybarTime.sh`
+  - That is the script Quick Settings already runs, so they cannot drift
+  - The prompt now offers 24H or 12H and applies whichever is answered
+  - The shipped modules and hyprlock templates now default to 24H
+  - The hyprlock hour label is swapped rather than set one way
+  - Answering 24H used to leave a 12H lock screen
+  - `hyprlock-2k.conf` had a live seconds label inside a commented block
+  - `test-waybar-clock.sh` covers both answers and the shipped defaults
+  - Issue: [#163](https://github.com/LinuxBeginnings/Hyprland-Dots/issues/163)
+
+- Workspace to display bindings from `nwg-displays` are applied again
+  - `nwg-displays` writes them to `workspaces.conf`, which nothing loads
+  - The Lua config reads `UserConfigs/workspaces.lua`, which held no rule
+  - So `SUPER` + `1`..`0` put the workspace on whichever monitor had focus
+  - `MonitorWatcher.sh` now imports that file as `hl.workspace_rule` entries
+  - Imported rules are marked, so a rule of your own is never rewritten
+  - A workspace you unassign in `nwg-displays` keeps its layout
+  - `ChangeLayout.sh` no longer binds a monitor when a layout is changed
+  - A layout belongs to the workspace, not to the display it was on
+  - An old rule left with `monitor` in it is cleared on the next layout change
+  - `PersistWorkspaceLayout.sh` no longer writes the dead `workspaces.conf`
+  - Issue: [#162](https://github.com/LinuxBeginnings/Hyprland-Dots/issues/162)
+
+- `custom/qs-network` now matches each Waybar style's module treatment
+  - Styles had a pasted `#custom-qs-network` rule with padding and radius
+  - The module was missing from each style's shared module selector list
+  - It now inherits the same pill, underline or background as `#network`
+  - `Garuda.css` and `Wallust-Box-type.css` use an underline, not a pill
+  - `Matt-bright-style.css` has no shared list, so it gets a standalone rule
+- Quickshell applets no longer render pure white in dark themes
+  - `templates/qml_color.json` mapped `layerBackground1` to `color7`
+  - In dark palettes `color7` is the light foreground text color
+  - Workspace cards in overview read `colLayer1`, which became pure white
+  - `templates/qml_color.json` now maps to `background` and `color12`
+  - `overview/common/Appearance.qml` derives surface layers via `ColorUtils.mix`
+  - `MaterialThemeLoader` discards light layer overrides in dark mode
+- Network widget paths no longer fail on non-standard XDG environments
+  - `Backend.qml` and `QsNetworkPanel.sh` resolved from an obsolete path
+  - Relative and environment-based path resolution restores functionality
+
+- A saved config file applies again after a dots upgrade
+  - An inotify watch follows the inode, not the path
+  - The upgrade backs `~/.config/hypr` up and copies a new tree in
+  - The watches then pointed at deleted directories and never fired again
+  - `inotifywait` stayed alive, so the watcher looked healthy but was deaf
+  - `LuaConfigWatch.sh` records each directory's inode and re-arms on a change
+  - Re-arming reconciles every watched file, so a save meanwhile still lands
+- The `custom/dot_update` Waybar tooltip is no longer blank
+  - `tooltip-format` is rendered as Pango markup, not plain text
+  - The text held a bare `&` in `Download & upgrade`
+  - Pango rejects that, so the tooltip parsed to nothing
+  - It is escaped as `&amp;` now
+
+- Clients that need an alpha buffer can start again, e.g. `kitty` on a VM
+  - `quirks:skip_non_kms_dmabuf_formats` defaults to `true`
+  - It narrows advertised renderer dmabuf formats to the display's scanout set
+  - On `virtio-gpu` that left only `XRGB8888`, so no alpha `EGLConfig` existed
+  - `kitty` failed with `EGL: No EGLConfigs returned`
+  - GLFW asks for `EGL_ALPHA_SIZE 8`, which no offered config had
+  - `lua/settings.lua` now sets `skip_non_kms_dmabuf_formats = false`
+  - Existing installs get it from the refreshed system config, no patch needed
+- The dots upgrade no longer stops at the first clone
+  - `kdu_clone_args` listed the clone options but not the `clone` subcommand
+  - `KooLsDotsUpgrade.sh` ran `git --depth=1 <url> <dest>`, which git rejected
+  - It aborted with `Could not clone Debian-Hyprland.` before downloading
+  - The argument list now starts with `clone`, so the plan matches the run
+- Gentoo is detected again, so the dots upgrade runs there
+  - `/etc/os-release` quotes its values with single quotes on Gentoo
+  - `kdu_os_release_value` stripped only double quotes
+  - `ID` read as `'gentoo'`, so detection fell through to `unknown`
+  - The upgrade then refused with `Automatic upgrade is not available`
+  - Either quote style is stripped, and Gentoo takes the dotfiles-only path
+- Rainbow Borders applies the border again on Hyprland 0.57
+  - 0.57 removed the legacy `keyword` socket command
+  - `hyprctl keyword` still exits 0, answering `unknown request`
+  - Both scripts read that as a successful write, so nothing was applied
+  - `RainbowBorders-low-cpu.sh` now writes every tick with `hyprctl eval`
+  - `RainbowBorders.bak.sh` does the same for the one-shot write
+  - `hl.config()` runs in Hyprland's Lua state, which answers exactly `ok`
+  - A rejected command is no longer mistaken for a write that worked
+  - `keyword` stays as a fallback for builds with no `eval` command
+  - The animated loop exits on `SIGTERM`/`INT` after restoring
+  - Without the exit it resumed and overwrote the restored border
+  - It also survived `SIGTERM`, leaving a loop that kept rewriting
+  - Restore reads the 0.57 `gradient data:` line and adds the `0x` prefix
+  - That line prints bare hex, which the colour parser rejected
+- The Rainbow Borders mode survives a config reload
+  - A reload re-runs the config, which never sets `general:col.active_border`
+  - `lua/decorations.lua` is a template and is deliberately not loaded
+  - So every reload put the border back to the default `ffffffff 0deg`
+  - Only `WallustSwww.sh` re-applied a mode, and only on a wallpaper change
+  - `RainbowBordersReloadWatch.sh` subscribes to the Hyprland event socket
+  - On `configreloaded` it runs `RainbowBordersStartup.sh`
+  - That is the one implementation every other caller already used
+  - A reload burst is settled first, so one reload re-applies the mode once
+  - Started unconditionally from `lua/startup.lua`; it costs one idle `socat`
+  - The socket path is re-resolved on reconnect, so a Hyprland restart is followed
+- The config is no longer reloaded every ~2 seconds
+  - `DisplayProfile.sh` rewrites `UserConfigs/monitors.lua` on every apply
+  - The `configreloaded` that follows made `MonitorWatcher.sh` re-apply
+  - It re-applied the named layout, rewriting the same bytes with a new mtime
+  - `LuaConfigWatch.sh` reloaded for that mtime, so the two looped
+  - It now hashes every watched file and skips a write that changed nothing
+  - A real save, a new file and a deletion still reload
+  - The baseline is seeded at startup, so restoring it is ignored too
+  - The polling fallback applies the same check
+  - Measured: 3 `configreloaded` per 6s before, 0 after
+- `Wallust Color` and `Gradient Flow` use the wallpaper palette again
+  - `RainbowBorders.bak.sh` read the palette with an awk parser
+  - It accepted `0x…`, `#RRGGBB` and `rgb(r,g,b)`
+  - Wallust writes `rgb(RRGGBB)`, six hex digits and no commas
+  - Nothing matched, so `WALLUST_COLORS` came out empty
+  - The script then silently fell back to the plain rainbow palette
+  - So both modes rendered the same border as `Original Rainbow`
+  - The parser now also reads `rgb(RRGGBB)` and `rgba(RRGGBBAA)`
+  - That is the form `lua/user_decorations_helper.lua` already parsed
+- `Original Rainbow`, `Wallust Color` and `Gradient Flow` read as a gradient
+  - `RainbowBorders.bak.sh` wrote the gradient at a fixed `270deg`
+  - A one-shot gradient at an axis-aligned angle is flat on two edges
+  - At `270deg` the long top and bottom edges were one colour each
+  - A 1px `border_size` made that read as a solid hairline border
+  - The angle is now a `45deg` diagonal, so all four edges carry colour
+  - `RB_ANGLE` overrides it; `0` and `90` are the flat-edge cases
+- Quickshell's generated palette holds valid colours again
+  - `templates/qml_color.json` prefixed two values with its own `#`
+  - Wallust writes `#RRGGBB`, so those lines rendered `##RRGGBB`
+  - `accentSecondary` and `borderSecondary` were both invalid colours
+  - The stray `#` is gone; every other value already used `{{colorN}}`
+  - Written on every wallpaper change, so it reached every install
+- A wallpaper change no longer kills Ghostty's own theme list
+  - `Ghostty_themes.sh` and `GhosttyThemeGuard.sh` run `ghostty +list-themes`
+  - `pidof ghostty` matched that run as well as the running terminal
+  - The reload signal went to both, so the list came back empty or short
+  - The guard read that as the theme not being installed
+  - It then commented the theme out and fell back to wallpaper colours
+  - `TerminalSignal.sh` resolves the application and skips CLI invocations
+  - A ghostty subcommand is a `+` argument; kitty adds `@` for remote control
+  - `WallustSwww.sh`, `ThemeChanger.sh`, `Ghostty_themes.sh` use it
+  - `GhosttyThemeGuard.sh` and `Kitty_themes.sh` use it too
+  - The list is read in about 65ms, so the window was short but real
+  - `tests/test-terminal-signal.sh` covers the skip
+- `Refresh.sh` brings Waybar back on NixOS
+  - It handed `/bin/bash` to `systemd-run` and to `setsid`
+  - NixOS ships no `/bin/bash`, so the bar was never relaunched
+  - Both now use `"$BASH"`, the bash already running the script
+  - That is absolute, so systemd's own `PATH` does not matter
+  - `tests/test-shebangs.sh` checks the rule repo-wide
+- The Ghostty theme menu lists the installed themes again
+  - It keeps only themes `ghostty +list-themes` reports
+  - Ghostty 1.4.0 tags the bundled set `(resources)`
+  - The filter stripped only `(user)` and `(builtin)`
+  - So the exact match missed and every built-in read as missing
+  - The menu offered only themes present as user theme files
+  - From a terminal it looked full: the resources path is set there
+  - Under rofi that path is unset, so the list came up nearly empty
+  - Any lowercase tag in parentheses is stripped now
+  - `GhosttyThemeGuard.sh` had the same filter and is fixed too
+  - A theme commented twice no longer produces two identical rows
+
+- The network widget lists every wired interface with all of its addresses
+  - Only the first `IP4.ADDRESS` from `nmcli device show` reached the panel
+  - Aliased and secondary IPv4 addresses and global IPv6 were dropped
+  - A second wired NIC appeared with an empty info block
+  - `QsNetworkPanel.sh` now reads `ADDR` records from `ip -o addr`
+  - `Backend.qml` attaches them to the device, so aliases list under `Address`
+  - Link-local `fe80::` addresses are left out
+- The network panel drops down under the Waybar module again
+  - It was pinned to the top-right corner with a fixed right margin
+  - Layer shell exposes no module geometry, so the pointer is the anchor
+  - The panel centres on the pointer whenever that is on a screen edge
+  - A keybind opened with the pointer elsewhere keeps the default corner
+  - It is 620px wide, so the six tabs no longer wrap onto a second line
+
+- The Ethernet tab lists a NIC that NetworkManager leaves unmanaged
+  - Some VM images hand the NIC to `/etc/network/interfaces` instead
+  - NetworkManager then reports the device `unmanaged` and the tab stayed empty
+  - `QsNetworkPanel.sh` marks every device `managed`; `Backend.qml` carries it
+  - An unmanaged device is listed read-only, with no Connect or Disconnect
+  - It still gets its info block, with the address the kernel reports
+  - `connected (externally)` counts as connected now, not as unmanaged
+  - The script and `Backend.qml` both read the state that way
+
+- The network widget keeps working without `nmcli`
+  - `nmcli` missing, or a snapshot that lists no devices at all, blanked the tab
+  - The wired list then comes from `ip` and `/sys/class/net` instead
+  - Each NIC keeps its addresses, gateway and MAC, read-only
+  - The footer says why, in the error colour, from an `ERR` snapshot record
+  - The Waybar tooltip carries the same line
+  - One `notify-send` per session names the missing NetworkManager
+  - Its marker is only written when `notify-send` exists, so it repeats otherwise
+  - DNS falls back to `resolvectl` when `resolv.conf` lists 127.0.0.53/54 or nothing
+    - systemd-resolved leaves only its stub there, so the real servers are asked
+    - The `resolvectl` answer replaces the list whenever it has one
+  - The README covers the fallback, the unmanaged case and a NIC migration recipe
+
+## Added:
+
+- HyprMod can edit the `UserConfigs` overrides directly
+  - `UserConfigs/hyprmod.toml` maps each editor to the file it owns
+  - Monitors, keybinds, window rules, animations and decorations
+  - `base_dir` stays `~/.config/hypr`, so `hyprland.lua` is the entrypoint
+
+- A search bar floats under the wallpaper carousel's deck
+  - Wider than a card, so a long file name stays readable
+  - Typing filters the deck in place and it re-centres on the current one
+  - The arrows and `Home`/`End` move the caret, so the deck steps with `Tab`
+  - The wheel and a click still step it; `Enter` applies the centred card
+  - `Escape` clears the filter first, a second press closes the deck
+  - It writes the same `wallpapers.query` the IPC filter already used
+  - So `QsWallpaper.sh open --query TEXT` opens the bar already filled
+  - `Q` no longer closes the deck: it is a printable key, so it filters
+  - `test-qs-wallpaper.sh` covers the bar and the filter
+
+- A Quickshell wallpaper carousel on `SUPER W`
+  - A frameless deck of portrait previews, tallest in the middle
+  - The cards fan over the wallpaper; nothing is drawn behind them
+  - `←` `→` or the wheel step, `Enter` applies, `Esc` or empty space closes
+  - It opens centred on the wallpaper that is on screen
+  - `QsWallpaper.sh open --query TEXT` opens it already filtered
+  - Quick Settings has a `Wallpaper Carousel` entry for the same deck
+  - Symlinked wallpapers and a capitalised `Wallpapers/` folder both work
+  - Adapted from the ML4W `WallpaperApp` carousel, GPL-3.0
+  - It reads this project's Wallust palette, not ML4W's `qs.CustomTheme`
+  - `QsWallpaper.sh` lists and applies through the existing wallpaper scripts
+  - `SUPER W` still opens the rofi menu where Quickshell is not installed
+  - Videos, GIFs and the effects stay with `WallpaperSelect.sh`
+  - `test-qs-wallpaper.sh` covers the listing, the apply and both menus
+
+- Tailscale, Docker and Podman tabs in the Quickshell network widget
+  - A tab exists only when the tool is installed or one of its links is present
+  - `LINK` and `FEATURE` records come from `ip -o link`, so no daemon is needed
+  - `tailscale0` reads its state from IFF_UP; its operstate reports `unknown`
+  - Tailscale: up/down switch, `TS-STATE`, exit node picker and peers
+  - Peers are `TSPEER` records with IP, OS, online state and this-device mark
+  - Exit nodes are `TS-EXIT`; "Suggest" runs `tailscale exit-node suggest`
+  - The prose output is matched against known exit node names and IPs
+  - Docker and Podman: bridge links with addresses, then the containers
+  - `BOX`/`BOXSTAT` give name, status, runtime, CPU and memory
+  - Clicking a container stops it, or starts it when stopped ones are shown
+  - A "Stopped" switch lists them; running containers is the default
+  - New: `quickshell/network-widget/VirtualNetTab.qml`
+  - New subcommands: `container docker|podman start|stop|restart NAME`,
+    `tailscale up|down|exit-node NAME|none` and `tailscale suggest`
+  - Exit node suggestions need `jq`; their section stays hidden without it
+- `docs/KoolDots-UserGuide.md` and spanish translation `docs/KoolDots-UserGuide.es.md`
+- Quickshell keybind panel: a searchable frame of key caps, grouped by function
+  - Lists what the compositor has bound, not what the config text says
+  - Reads the same live index `SUPER SHIFT K` hands to rofi
+  - One 3D key cap per key in the chord, drawn rather than shipped as images
+  - Modifier caps are tinted with the palette accent
+  - Sorted into categories, with a header and a count per category
+  - Two binds to a row in one scrollable page; frame up to 1426x989
+  - Type to filter on the chord or the description
+  - `↑`/`↓` move the selection, `Enter` copies the chord
+  - `Esc` or a click outside dismisses it
+  - `SUPER SHIFT K` opens it, the keybind the rofi menu had
+  - Where quickshell is missing that keybind opens the rofi menu instead
+  - So the Ubuntu 24.04 based installs keep the menu they always had
+  - `QsKeybinds.sh which` prints which of the two would open
+  - Colours follow wallust; the layer rule blurs the card only
+  - New: `quickshell/keybinds/` and `QsKeybinds.sh`
+- Quickshell network / Bluetooth widget for waybar
+  - Ethernet, Wi-Fi and Bluetooth tabs, with address, gateway, DNS and MAC
+  - Waybar `custom/qs-network` icon on every bundled bar layout
+  - Each bundled style carries a matching `#custom-qs-network` rule
+  - Colours follow wallust, so the panel tracks the current wallpaper
+- Waybar's dots update check can now download and run the upgrade
+  - Right-click `custom/dot_update`, or pick `Upgrade now` in its window
+  - It clones the installer for your OS and `Hyprland-Dots` into a temp dir
+  - Both land in a random `kooldots-upgrade-*` directory under `$HOME`
+  - It runs the installer's `install-scripts/update-deps.sh` first
+  - Then `copy.sh --tty --express-upgrade` for the dots
+  - A terminal opens for both, since they use `sudo` and ask questions
+  - It asks before removing the temp dir, and keeps it when a step fails
+  - It reminds you to update the OS first, and links the Debian Hyprland guide
+  - Linux Mint and Zorin OS are supported as Ubuntu 24.04 based
+  - Ubuntu 26.10 is not supported and uses the 26.04 branch, with a warning
+  - On NixOS and Gentoo only the dots are updated, after a `[Y/n]` prompt
+    - Neither has an installer to clone or an `update-deps.sh` to run
+    - The window offers `Upgrade Dots only` and links `Packages Required`
+    - Install the packages the dots need yourself before upgrading
+  - An unrecognised distro still gets the check-only message
+  - `KooLsDotsUpgrade.sh --dry-run` prints the plan and changes nothing
+- `WaybarStartup.sh` records why it started, or why it did not
+  - Every early exit was silent, so a missing bar had no explanation
+  - A lock timeout, an already-running bar and a failed launch looked alike
+  - It now logs the environment, the resolved config and the branch taken
+  - `WAYBAR_STARTUP_LOG` defaults to `$XDG_RUNTIME_DIR/waybar-startup.log`
+  - It logs whether a bar actually appeared, not just that one was launched
+  - Waybar's own stderr now goes to `$XDG_RUNTIME_DIR/waybar.log`
+  - It was sent to `/dev/null`, so a config or CSS error left no trace
+  - `WAYBAR_LOG` still overrides that destination
+- Window wobble can be toggled from `SUPER SHIFT X` or quick settings
+  - Hyprland 0.57 added `decoration:wobble`, and it ships disabled
+  - `scripts/ToggleWobble.sh` flips it and reloads
+  - The toggle is persistent: it rewrites `UserConfigs/user_decorations.lua`
+  - The wobble table there also holds the physics, so one place to tune
+  - `ToggleWobble.sh` refuses to write below Hyprland 0.57
+  - Older compositors get a notification naming the version required
+  - `Kool_Quick_Settings.sh` lists it under `[[ Toggle Options ]]`
+  - `system_keybinds.lua` binds `SUPER SHIFT X`
+  - `ToggleWobble.sh --status` prints `On`/`Off`/`Unsupported`
+- The wallpaper palette can come from `butterpal` instead of `wallust`
+  - `butterpal --json` emits a pywal colorscheme, which `wallust cs` reads
+  - So wallust still renders every template and the two swap cleanly
+  - `WallustConfig.sh` holds the source resolution and the scheme path
+  - `WallustSwww.sh` and `copy.sh` both use it
+  - Named themes (`wallust theme`) stay wallust's, which has no equivalent
+  - Falls back to `wallust run` when butterpal produces no scheme
+  - butterpal reads PNG, JPEG, BMP and GIF; WebP and video take that fallback
+  - `KOOLDOTS_PALETTE_SOURCE` or `state/hypr/palette_source` picks the source
+  - Without either, wallust, which is the default
+  - butterpal is opt-in: it is not installed by default
+  - Quick Settings lists `Choose Palette Source` under `[[ Misc ]]`
+  - It marks the current source and regenerates on a change
+  - Picking Butterpal with butterpal missing notifies and changes nothing
+  - The state file would otherwise claim a source that cannot run
+  - `ButterpalWallust.sh --source butterpal` refuses the same way
+  - `ButterpalWallust.sh` renders on demand and takes `--dry-run`
+- `butterpal` is installed from a bundled asset
+  - `copy.sh` unpacks `assets/butterpal.gz` to `/usr/local/bin`
+  - Only when it is not already installed, and never on NixOS
+  - The check looks at `PATH`, then `/usr/bin` and `/usr/local/bin`
+  - An install can run under `sudo` with a `PATH` holding neither
+  - The asset is dynamically linked, so it cannot run on NixOS
+  - A flake is expected to provide it there instead
+  - butterpal stays optional: the palette source still defaults to wallust
+- Quickshell network & bluetooth panel for Waybar
+  - Horizontal tabs for Ethernet, Wi-Fi and Bluetooth, one screen each
+  - `custom/qs-network` shows the active link, left click opens the panel
+  - Right click keeps the old `nmtui` behaviour
+  - Ethernet and Wi-Fi tabs show address, gateway, DNS and MAC
+  - Wi-Fi tab lists networks, click one to connect, the active one to drop
+  - Locked networks ask for the password inline
+  - Bluetooth tab groups connected devices and shows their battery
+  - Panel follows wallust: background, accent and text from the palette
+  - Both `colors-waybar.css` and `qml_color.json` are watched for changes
+  - New: `quickshell/network-widget/` and `QsNetworkPanel.sh`
+  - Enabled on the `TOP-Default` and `TOP-Default-Laptop` bars
+- `config/hypr/scripts/KeybindProbe.sh` and `docs/HOWTO-Keyboard-Mappings.md`
+  - A bind is written against a keysym, and the Fn row legends often lie
+  - A keysym nothing emits registers a bind that is listed and never fires
+  - The script asks the compositor instead of the key legend
+  - Its probe is loaded with `hyprctl eval` and claims a net of candidate keysyms
+  - Each one logs the keysym Hyprland actually received
+  - Every chord it claims is unbound first, so a keypress only logs
+  - The probe lives in the running compositor and `hyprctl reload` discards it
+  - Needs a Hyprland 0.57+ session: no root, no `wev`, no packages
+  - `--check-deps` prints what is missing and how to install it
+  - The HOWTO covers why guessing fails, which file to edit and the bind form
+- `docs/Plan-Adding-SilentSDDM.md`, a design doc for a SilentSDDM integration
+  - Design only: `copy.sh` and the config do not implement it yet
+- The user guide documents the network / Bluetooth panel
+  - Section 8 covers the tabs, the click behaviour and the two degraded cases
+  - `docs/KoolDots-UserGuide.es.md` carries the same section
+
+## Updated:
+
+- The wallpaper carousel previews are 15% larger
+  - Card height was a fixed `0.36` of the monitor height
+  - The size is now `cardHeightFraction` and `cardAspect` in `Carousel.qml`
+  - Width follows from the height and the portrait ratio, so both grew
+  - `test-qs-wallpaper.sh` still pins the portrait shape
+
+- `custom/qs-network` follows a link change in about a second
+  - The module ran `QsNetworkPanel.sh status` every 10s
+  - A cable pulled, or a NetworkManager state change, sat unnoticed in the bar
+  - `interval` is 1 now; the script takes tens of milliseconds per run
+  - It stays polling, not an event subscription: Waybar has no push API for `exec`
+  - The README states the rate and the cost
+
+- Quickshell applets unified on dynamic Wallust theme resolution
+  - Portable `MaterialThemeLoader` installed across applets
+  - `overview` and `qs-hyprview` update dynamically on wallpaper change
+  - Legacy M3 aliases preserved for compatibility with existing widgets
+
+- `SUPER SHIFT B` opens the Rainbow Borders mode menu
+  - It ran `RainbowBorders-low-cpu.sh --run-once`, one fixed gradient
+  - The menu was two levels into Quick Settings, so it was rarely reached
+  - `Kool_Quick_Settings.sh --rainbow-borders` opens that submenu directly
+  - Disable, Wallust Color, Original Rainbow, Gradient Flow, Low CPU Rainbow
+  - It calls the same menu function, so the mode marker is shared
+  - Both entry points show the same current mode and apply the same way
+- `Wallust Color` and `Gradient Flow` animate, like `Low CPU Rainbow`
+  - `RainbowBorders.bak.sh` wrote one frame and exited
+  - `gradient_flow` advanced its glow only at the end of a run
+  - Every run was a fresh process, so the glow stayed at stop 0
+  - Half the border was the one base colour, which read as solid
+  - `Wallust Color` picked each of its ten stops independently at random
+  - The scrambled order averaged out to a mid-tone on a thin border
+  - The script is a loop now; `--once` still writes a single frame
+  - `Wallust Color` slides a ten-colour window along the palette
+  - `Gradient Flow` moves the glow one stop per frame
+  - `Original Rainbow` rotates the gradient angle
+  - Both loops hold a PID lock, so each start stops the other
+  - `RainbowBordersStartup.sh` and Quick Settings stop it on a mode change
+- `hl.meta.lua` refreshed to the stub Hyprland 0.57.0 ships
+  - It is generated upstream by `meta/generateLuaStubs.py`
+  - The installed copy is `/usr/share/hypr/stubs/hl.meta.lua`
+  - The vendored copy was 1252 lines; the shipped stub is 2015
+  - Editors flagged `decoration.wobble.*`, which the dots already set
+  - New `HL.ConfigOpt` tree types `hl.config({ ... })` as well
+  - Refresh with `cp` from that path, then add the trailing newline
+- `colors-ghostty.conf` no longer claims it is always included
+  - It said the file "is included by `~/.config/ghostty/config` when present"
+  - Both shipped configs ship that line commented, with a theme active
+  - So the file was written on every wallpaper change and read by nothing
+  - That is why the Ghostty reload signal went unnoticed for so long
+  - The header now names the `config-file` line that turns the include on
+- The wallpaper accent is the palette's `color12`, for both sources
+  - `color12` is the accent the borders, menus and bar read
+  - wallust already puts its accent in that slot
+  - butterpal keeps `color12` ANSI blue and puts its accent in `cursor`
+  - `WallustConfig.sh` moves that accent into `color12` before rendering
+  - So the templates stay on `{{color12}}` and serve both sources
+  - An earlier attempt pointed the templates at `{{cursor}}` instead
+  - wallust's cursor is a warm tone, so a blue wallpaper came out pink
+  - Rofi's selection is no longer rebuilt from `color12`/`color13`
+  - Under butterpal, terminal slot 12 is the accent, as wallust did before
+- Ghostty's wallpaper colours need a Ghostty reload, not a signal
+  - `WallustSwww.sh` sends `SIGUSR2`, which Ghostty receives and acts on
+  - On 1.4.0 that reload does not repaint a surface that is already open
+  - Writing the palette into the main config fails the same way
+  - So the colours appear only after Ghostty's own reload or a restart
+  - The signal stays: it is right for builds that do apply it
+- The Ghostty palette lives under `UserConfigs` now
+  - It was written to `~/.config/ghostty/wallust.conf`
+  - Kitty's palette has always been in `UserConfigs/kitty-themes/`
+  - So it moves to `UserConfigs/ghostty-themes/01-Wallust.conf`
+  - That directory is protected, so another tool cannot overwrite it
+  - `patches/22-ghostty-wallust-target.sh` moves it on an upgrade
+  - The patch rewrites the include in both configs, keeping its state
+  - It is idempotent and skips a fresh install
+- The two shipped Ghostty configs no longer disagree
+  - `config/ghostty/config` shipped `font-family = "Iosevkeley Mono"`
+  - `UserConfigs/ghostty.conf` shipped `JetBrainsMono Nerd Font Mono`
+  - The runtime template carried a name `21-ghostty-font.sh` exists to fix
+  - Which font was in effect depended on what ran last
+  - They are identical now, and a test keeps them that way
+- The additional wallpaper download reports progress instead of looking hung
+  - `git clone` sent both streams to the log, and git draws no meter off a tty
+  - `copy.sh` passes `--progress` and tees the output, so the meter is visible
+  - A pipeline reports `tee`'s status, so git's is read from `PIPESTATUS`
+
+## Removed:
+
+- Hard coded keybard `pc105` from `config/hypr/lua/settings.lua`
+- Deprecated `dwindle.special_scale_factor` setting
+  - `hyprctl deprecated-config` flags it on Hyprland 0.57
+  - The special workspace is inset with a workspace rule instead
+  - The rule is a system default in `lua/workspaces.lua`, so updates carry it
+  - Override it with a rule in `UserConfigs/workspaces.lua`
+  - `gaps_out` is absolute pixels, unlike the old `0.8` factor
+  - Raise `gaps_out` on a display larger than 1080p
+  - `special:scratchpad` needs no rule: the dropdown terminal is floating
+- The gaps and border example in `user_settings.lua`
+  - It showed `gaps_in`, `gaps_out` and `border_size` under `general`
+  - `user_decorations.lua` loads later and sets all three
+  - So the example never applied, and read as the place to edit them
+  - The comment now points at `UserConfigs/user_decorations.lua`
+- The `dots-tui` installer binaries
+  - `dots-tui` and `dots-tui-ubuntu-2404` were a packed Python TUI, 18MB
+  - Nothing in the dots called them, in config, scripts, keybinds or docs
+  - It had fallen well behind the current config layout
+  - A replacement install/upgrade TUI is planned
+- `docs/LuaScriptsMigrationPlan.md`
+  - The bash-to-Lua migration it tracked is finished
+  - Its verification notes described steps that no longer exist
+
+---- 
+
+## v2.3.28.1
+
+## Fixed:
+
+- `unbind(...)` works on installs older than v2.3.26.2
+  - v2.3.24 to v2.3.26.1 shipped a `user_keybinds.lua` with only `bind` in it
+  - The helper exported `unbind` and `dispatch`, the template never pulled them
+  - A call was `attempt to call a nil value`, which aborts the whole file
+  - `user_overrides.lua` reports that as one `[WARN]`, so the key looked inert
+  - A hand-written `pcall(hl.unbind, ...)` worked, bypassing the helper
+  - So the helper read as having no `unbind` at all, which is what was reported
+  - `copy.sh` only ADDS missing `UserConfigs` files, so v2.3.26.2 never arrived
+  - `patches/90-user-keybinds-helper-locals.sh` adds the two missing lines
+  - It adds them after the helper lines the file already has, and nothing else
+  - Issue: [#164](https://github.com/LinuxBeginnings/Hyprland-Dots/issues/164)
+
+---
+
+## v2.3.28
+
+## Fixed:
+
+- A `monitors.lua` refresh-rate edit survives `hyprctl reload`
+  - `MonitorWatcher.sh` re-applied the recorded layout on `configreloaded`
+  - The record still held the previous mode, so the edit was undone in ~2s
+  - It now asks `DisplayProfile.sh config-newer` and stands down when edited
+  - The check compares mtimes against the recorded layout
+  - `UserConfigs/monitors.lua`, `lua/monitors.lua`, `user_laptops.lua` count
+- `HDMI-A-1-HighRefreshRate` no longer drops to 1024x768
+  - `mode = "highrr"` is the highest refresh rate at any resolution
+  - A 1920x1080@75 panel also advertises 1024x768@75.03, which won
+  - The profile now asks for `1920x1080@75` explicitly
+  - `Monitor_Profiles/` is restored from backup, so an install needs a patch
+  - `patches/85-monitor-profile-refresh-rate.sh` replaces it when unedited
+- Disabled monitor broke `nwg-displays` parser
+- Moved waybar `network#speed` network mgr `nmtui` to Modules
+  - It was per bar and not consistent
+  - Thanks Leonardo Araujo @leolca
+- Legacy `hyprctl dispatch` calls no longer silently do nothing
+  - Since Hyprland 0.55, `hyprctl dispatch` is a shorthand for `hl.dispatch(...)`
+  - A dispatcher name plus arguments is parsed as Lua, so `workspace e+1` fails
+  - `waybar/ModulesWorkspaces` scroll handlers use `hl.dsp.focus({ workspace = ... })`
+  - All 7 modules carried the same dead pair, 14 handlers in total
+  - `raw_dispatch_cmd` emitted `hyprctl dispatch <name>`, which could never run
+  - It now warns once per name at config load and returns `hl.dsp.no_op()`
+  - The two copies are `system_keybinds.lua` and `user_keybinds_helper.lua`
+  - `Logout.sh` drops the `exit 1` / `exit 0` / `exit x` variants
+  - `exit` takes no argument in either mode, so they could never succeed
+  - `Logout.sh` spawns hyprshutdown through `hl.dsp.exec_cmd(...)`
+- Editing `UserConfigs/*.lua` applies on save, with no `hyprctl reload`
+  - Hyprland's built-in autoreload watches only the entrypoint `hyprland.lua`
+  - Other files the config loads arrive through `dofile`, which it never sees
+  - A saved `UserConfigs` file stayed inert until a manual reload
+  - `scripts/LuaConfigWatch.sh` watches `lua`, `configs` and `UserConfigs` for `*.lua`
+  - On a save it debounces, then touches `hyprland.lua`, the watched path
+  - Saves of non-`.lua` files in those directories are ignored
+  - One instance per user; it exits cleanly on `SIGTERM` and removes its pidfile
+  - Falls back to `hyprctl reload` when `misc:disable_autoreload` is on
+  - Falls back to 1s polling where `inotify-tools` is not installed
+  - A syntax error in a saved file raises a notification
+- Waybar no longer fails to start on boot or after screen lock
+  - `startup.lua` chained `WallpaperDaemon.sh` and `WaybarStartup.sh` with `&&`
+  - A wallpaper delay or failure blocked Waybar from ever launching
+  - `WaybarStartup.sh` used `flock -n`, dropping concurrent restarts
+  - `WallustSwww.sh` sent `SIGUSR2` while Waybar was still initializing
+  - `startup.lua` now launches them as separate startup commands
+  - `WaybarStartup.sh` uses bounded wait on its lock, preserving restarts
+  - `WaybarStartup.sh` discovers and exports `HYPRLAND_INSTANCE_SIGNATURE`
+  - `WallustSwww.sh` skips signalling while Waybar holds the startup lock
+- Duplicate waybars when opening laptop lid
+- Opening the lid turns the laptop panel back on
+  - `user_laptops.lua` replayed the stored `monitors.lua` rule as it was
+  - A rule that omits `disabled` does not switch an output back on
+  - So the panel stayed dark and its workspaces stayed on the external screen
+  - The branch now always sets `disabled = false`, keeping the stored mode
+  - `patches/83-user-laptops-lid-open.sh` fixes existing installs
+- The only screen stays on, at the origin, when nothing else is connected
+  - The no-externals branch replayed the stored `monitors.lua` rule as it was
+  - A rule that omits `disabled` does not switch an output back on
+  - A rule from a monitor set that had more kept its old position
+  - So the only screen could come back dark, or off the origin
+  - The branch now forces `disabled = false` and `position = "0x0"`
+  - A stored `transform` is carried over too, which the branch dropped
+  - `patches/84-user-laptops-single-monitor.sh` fixes existing installs
+- The animation chosen from the menu no longer resets to the defaults
+  - `copy.sh` copies the repo's `UserConfigs` before the migration runs
+  - The shipped comment-only `user_animations.lua` was already in place
+  - The migration kept any existing `user_animations.lua`, placeholder and all
+  - On a hyprlang install the choice lives in `UserAnimations.conf`
+  - `migrate-hypr-to-lua.sh` converts it to `hl.curve`/`hl.animation` Lua
+  - A preset the Animations menu wrote is still left untouched
+- Rofi and wlogout selections no longer reset on an upgrade
+  - `copy_phase2` replaces `hypr/` and `wlogout/` with the repo copies
+  - The rofi `@theme` line and `wlogout/.current_theme` were never restored
+  - `restore_hypr_assets` now carries the active rofi theme into `config.rasi`
+  - `restore_wlogout_selection` re-applies the saved wlogout preset
+  - `RofiWlogoutTheme.sh` reads `.current_theme` back into `CURRENT_PRESET`
+- The restore helpers no longer look in the wrong backup directory
+  - They declared `local BACKUP_DIR`, hiding the cached suffix
+  - `get_backup_dirname` then generated a fresh timestamp per call
+  - A run crossing a minute boundary restored from a path that never existed
+- Monitors no longer default to the largest mode a panel advertises
+  - `ds_generate` took the biggest available mode, not the one in use
+  - A VM's `Virtual-1` was pinned to `5120x2440@50` on every boot
+  - It now keeps the mode already on screen, the panel's own `preferred` choice
+- A boot no longer overwrites `UserConfigs/monitors.lua`
+  - `DisplayProfile.sh auto` rewrote the file on every login, not on an apply
+  - Hand edits were replaced, and the shipped `Virtual-1` rule was overridden
+  - Only an explicit apply or an nwg-displays drag writes it now
+- The shipped wildcard monitor default is `preferred`, not `highres`
+  - `lua/monitors.lua` chained `preferred`/`highrr`/`highres` for `output = ""`
+  - The last matching rule wins, so every output was asked for `highres`
+  - `Monitor_Profiles/default.lua` had the same chain
+- Layout-aware focus binds no longer fork a script per keypress
+  - `SUPER + j`/`k` and `SUPER + arrow` ran `LayoutKeybindDispatch.sh`
+  - It spawned bash, 4-8 `hyprctl` and `jq` processes on every press
+  - Ported to `lua/window_actions.lua` as `layout_cycle`/`layout_focus`
+  - Tries the layout message first, falls back only if focus did not move
+  - Scrolling uses `hl.dsp.layout("focus l/r")`, monocle `cyclenext`/`cycleprev`
+  - Everything else uses `hl.dsp.focus` and `hl.dsp.window.cycle_next`
+- `ALT + Tab` and user `cyclenext` binds now cycle in-process
+  - `LuaCycleWindow.sh` spawned bash, 2 `hyprctl` and a `jq` program per press
+  - Ported to `lua/window_actions.lua` as `cycle_window`, address-sorted order
+  - `dispatch("cyclenext")` in user configs fell through to a dead legacy name
+  - `lua/user_keybinds_helper.lua` now maps it to the in-process action
+- Waybar no longer polls `hyprctl` on a timer
+  - `custom/hypr_layout` ran `HyprLayoutModule.sh` every 2s
+  - That reached `ChangeLayout.sh` and then `hyprctl -j activeworkspace | jq`
+  - `custom/keyboard` ran `KeyboardLayout.sh status` every 1s
+  - It makes four `hyprctl devices -j | jq` calls per run
+  - About 4.5 `hyprctl` + 4.5 `jq` forks per second, for the whole session
+  - Both now subscribe to the Hyprland event socket in `HyprEventWatch.sh`
+  - They re-render only when the state they show actually changes
+  - `HyprLayoutModule.sh` reads the layout over the socket, not `hyprctl`
+- Gesture zoom no longer freezes the compositor
+  - The 3-finger swipe ran `io.popen("hyprctl ...")` on the compositor thread
+  - `io.popen` waits for the child, so the session stalled for the round trip
+  - It also wrote through `hyprctl keyword`, the legacy hyprlang form
+  - Now one in-process `hl.get_config` / `hl.config` pair, clamped to 1.0-16.0
+- Laptop monitor layout no longer shells out from the compositor
+  - `user_laptops.lua` used `io.popen` for the lid-state fallback
+  - `connected_drm_connectors()` ran one `io.popen("ls ...")` per DRM card
+  - Lid state now reads fixed sysfs paths, connectors use plain file reads
+- Layout label refresh now goes through the Hyprland socket
+  - Waybar only re-execs a custom module while the script is not running
+  - Both status modules loop, so `signal: 8` never fired
+  - The label went stale until the next workspace switch
+  - `ChangeLayout.sh` and the layout menu now emit `custom>>kool:layout`
+  - `hypr_emit_event` in `HyprIPC.sh` sends it; the listener re-renders on it
+- `HyprLayoutModule.sh` had lost its `change_layout` path
+  - `set_layout` called an empty variable, so the layout menu set nothing
+- Night light icon updates on change instead of a 3s poll
+  - `custom/nightlight` re-ran bash + pgrep every 3s for a manual label
+  - `Hyprsunset.sh` pushes RTMIN+9 on change and reads its state without `cat`
+  - The module keeps a 60s interval for hyprsunset exiting outside the script
+- Existing installs never received the layout-refresh throttle
+  - `copy.sh` protects `UserConfigs`, so shipped copies kept the old code
+  - `patches/70-user-laptops-refresh-throttle.sh` inserts it in place
+- Two Waybar bars no longer kill each other's status listeners
+  - The guard was keyed by module name only, so a second bar replaced it
+  - Waybar then reported `stopped unexpectedly` and re-ran it every 10s
+  - It is now keyed by the parent bar; a listener exits when its bar does
+- A shut laptop lid no longer switches off its only screen
+  - `user_laptops.lua` disabled the internal panel whenever the lid closed
+  - With no external monitor that left the session with no output at all
+  - The panel now stays on unless another monitor can show the session
+  - `patches/80-display-layouts.sh` applies the same fix to existing installs
+- A killed `MonitorWatcher.sh` no longer strands its own lock
+  - The event stream runs in a process-substitution subshell that outlives it
+  - `9>&-` on the call inside `<(...)` left bash's saved copy of fd 9 open
+  - So the subshell held the flock, and no watcher could start until socat ended
+  - The subshell now closes fd 9 with `exec 9>&-` before it starts the stream
+- Existing installs kept the old `Monitor_Profiles/README`
+  - On upgrade it is restored from the backup, so the shipped copy never lands
+  - `patches/81-monitor-profiles-readme.sh` appends the current notes instead
+  - It appends rather than replaces, so a user's own notes there survive
+- Waybar no longer goes missing after a restart
+  - A bar that was just signalled can linger while it dumps core
+  - `pgrep` kept matching it, so the relaunch thought a bar was already up
+  - It skipped its own launch, so the session had no bar until the next try
+  - `is_waybar_running` now ignores `Z` (exited) and `D` (dumping core)
+  - A stop waits for the bar to leave, and a restart forces the launch
+  - `LidSwitch.sh` asks the same question before signalling a bar
+  - Issue: [#158](https://github.com/LinuxBeginnings/Hyprland-Dots/issues/158)
+    - Thanks again Angel Spano @jasueh for the info to find issue
+- The keybind search menu was missing binds that were active
+  - `KeyBinds.sh` regexed the keybind files with `keybinds_parser.py`
+  - It printed the source text, so it could not see what the helpers derive
+  - 12 were absent: 10 `SUPER SHIFT + number` variants, 2 lid switches
+  - Media keys read as `xf86audiomute` rather than `XF86AudioMute`
+  - The menu now lists the binds the compositor actually has
+  - So it cannot under-report, and it follows an override or an unbind
+- Waybar's `network#speed` module no longer ignores right-click
+  - The `network` block set `on-click-right`, `network#speed` set none
+  - Waybar looks up `config["network#speed"]`, not the parent module
+  - The instance now runs `WaybarScripts.sh --nmtui`, as `network` does
+  - Issue: [#161](https://github.com/LinuxBeginnings/Hyprland-Dots/issues/161)
+
+## Added:
+
+- `END4-smooth.lua` animation preset
+  - From current END4 dotfiles
+  - https://github.com/end-4/dots-hyprland
+  - Drops three `expressive*Spatial` curves nothing referenced
+  - Adds `global` and `fade`, which upstream leaves unset
+  - Affects `fadeSwitch`, `fadeShadow`, `fadeGlow`, `fadeDim`, `fadePopups*`
+  - Those now take the preset's timing, not Hyprland's stock values
+  - Retimed: `windowsIn`/`fadeIn` 4.9, `windowsOut`/`fadeOut` 2.9
+  - `workspaces` 30, so the slide is visibly slower than upstream's 7
+- `PR43` animation preset
+  - https://github.com/43PR/dotfiles
+- Indicator to mark current animation
+- Indicator to mark the current Rainbow Borders mode
+  - `Kool_Quick_Settings.sh` marks the mode in effect and pre-selects it
+  - The marker is stripped before the choice is used as a mode
+- Indicator to mark the current selection in the other pickers
+  - `Kitty_themes.sh`, `Ghostty_themes.sh`, `RofiThemeSelector.sh`
+  - `ChangeStarshipPrompt.sh` and `ZshChangeTheme.sh` had none at all
+  - `ThemeChanger.sh` marked the theme but never pre-selected the row
+  - `select-hyprview-layout.sh`, `MonitorProfiles.sh`, wlogout blur level
+  - The marker is stripped again before a choice is read as a name or path
+- `config/hypr/scripts/tests/test-migrate-animations.sh`
+  - Covers carrying the animation from `UserAnimations.conf` into Lua
+  - 11 checks, from a sandbox `XDG_CONFIG_HOME` with no session
+- `config/hypr/scripts/tests/test-installer-selections.sh`
+  - Covers the rofi `@theme` carry and the wlogout preset restore
+  - 20 checks, from a sandbox `XDG_CONFIG_HOME` with no session
+- `config/hypr/scripts/tests/test-rainbow-borders-menu.sh`
+  - Covers the Rainbow Borders indicator and the marker strip
+  - 11 checks, from a sandbox `XDG_CONFIG_HOME` with no session
+- Marker tests for the four theme pickers
+  - `tests/test-kitty-theme-menu.sh`, `tests/test-ghostty-theme-menu.sh`
+  - `tests/test-starship-prompt-menu.sh`, `tests/test-zsh-theme-menu.sh`
+  - Each asserts the marker never reaches a config, a link or `ZSH_THEME`
+  - 20 checks, from a sandbox `XDG_CONFIG_HOME` with no session
+- `patches/82-monitors-lua-reset.sh` recovers an upgraded install
+  - Removes a `UserConfigs/monitors.lua` that an older version generated
+  - Keeps a `monitors.lua.generated-backup-<date>` copy beside it
+  - Saved layouts live in `display-layouts.json` and are untouched
+  - Runs once, so a layout applied later is never removed
+- Lua syntax validation in Quick Settings (`Kool_Quick_Settings.sh`)
+  - Automatically validates edited `.lua` files with `luac -p` on editor close
+  - Sends desktop notifications for syntax errors, successful check, or if `luac` is not installed
+- `scripts/HyprIPC.sh` and `scripts/HyprEventWatch.sh`
+  - Socket helpers, plus the event listener the two status modules use
+- `patches/60-user-laptops-nonblocking.sh`
+  - Removes the blocking `io.popen` calls from an installed `user_laptops.lua`
+- `patches/70-user-laptops-refresh-throttle.sh`
+  - Adds the layout-refresh throttle to an installed `user_laptops.lua`
+- `waybar/configs/Matt-Legacy-config` and `waybar/style/Matt-bright-style.css`
+  - A top bar layout built on the project module files via `include`
+  - `custom/menu`, `custom/power` and `tray` come from those files
+  - `custom/swaync`, `custom/hint`, `custom/keyboard` are icon/text pairs
+  - Only the text half of a pair runs a script, so listeners cannot collide
+  - The style inlines its gruvbox palette, so it ships as one file
+- Multi-monitor display layouts
+  - A layout belongs to a monitor set, keyed by device, not by port
+  - `SUPER + ALT + D` opens the menu; `SUPER + ALT + W` applies layout `Work`
+  - A layout you apply is written to `UserConfigs/monitors.lua`, which Lua loads
+  - So a layout survives a reload, a restart and a lid event
+  - Per layout: on/off, mode, scale, rotation, position, primary, Waybar bars
+  - `nwg-displays` is bridged, and a run you start yourself is imported too
+  - The watcher watches nwg's own `monitors.conf` and imports it when it changes
+  - A run the menu did not start leaves no pause file, so it is found by name
+  - Lid handling stays in `user_laptops.lua`, which reads the same file
+  - 568 checks run from JSON fixtures with no monitors attached
+- `Monitor Profiles` uses the same layout store
+  - From Quick Settings (`SUPER + SHIFT + E`), lists this set's layouts
+  - `Monitor_Profiles/*.lua` is offered as a one-way import into the store
+- `patches/80-display-layouts.sh` activates the feature on existing installs
+  - `copy.sh` only adds missing `UserConfigs` files, so the edits never landed
+  - It starts `MonitorWatcher.sh` and adds the two display keybinds
+- `config/hypr/scripts/tests/test-lua-syntax.sh`
+  - Parses every `.lua` file under the config with `luac -p`
+  - One syntax error anywhere takes the whole config load down with it
+  - The `UserConfigs` files load through a `pcall`, so that failure is silent
+  - It also catches a stray copy of a broken file left in the config tree
+  - Reports and passes where `luac` is not installed
+- `Monitor_Profiles/Work.lua`, a shipped profile to copy or edit
+  - One `preferred` / `auto` / `1` rule per output, matched by port
+  - Covers `eDP-1`, `DP-1`..`DP-3`, `HDMI-A-1` and `HDMI-A-2`
+  - Apply it from Choose Monitor Profiles, then `SUPER + ALT + W` applies it
+  - `preferred` rather than `highres`: the panel's own choice, always usable
+- `waybar/configs/TOP-Garuda`, `waybar/style/Garuda.css`, `waybar/launcher.png`
+  - A Nord top bar ported from a Garuda Linux Waybar
+  - `modules-left` opens with `custom/menu`, the rofi app menu
+  - Workspace indicators are numbers (`hyprland/workspaces#numbers`)
+  - `modules-right` ends with `custom/power`, the wlogout menu
+  - `custom/power` is the project module, pulled in through `include`
+  - `custom/menu` is mirrored locally to draw the launcher image
+  - It keeps the same rofi action; only `format` differs
+  - `launcher.png` sits at the waybar root, where `url()` resolves
+  - The style inlines its Nord palette, so it ships as one file
+
+## Updated:
+
+- `docs/HOWTO-Upgrade-Dotfiles.md` says what an upgrade keeps
+  - The rofi theme, the wlogout preset and the saved display layouts
+  - The `.es.md` translation is kept in sync
+- Do not add `require("monitors")` to your Hyprland config
+  - `nwg-displays` 0.4.3+ writes a Lua sibling at `~/.config/hypr/monitors.lua`
+  - This config never loads that path, so the sibling stays inert on purpose
+  - Adding the `require` makes it live and it competes with `monitors.lua`
+  - Its own README suggests the line for Hyprland 0.55+; ignore it here
+- The display-layout docs no longer say a direct `nwg-displays` run is lost
+  - `README-display-layouts.md` and the operational guide cover it instead
+- Removed KB default "pc105" from `user_settings.lua`
+- `docs/HOWTO-Change-Keybindgs.md` now covers `dispatch(...)` resolution
+  - Documents the in-process helper mapping and the native `hl.dsp.*` form
+  - Corrects the `["repeat"]` and `dispatch("pin")` examples
+  - Notes that `LayoutKeybindDispatch.sh` and `LuaCycleWindow.sh` are gone
+  - The `.es.md` translation is kept in sync
+
+## Removed:
+
+- The dead lid close/open paths in `scripts/LidSwitch.sh`
+  - Nothing called them: `user_laptops.lua` binds the lid switch itself
+  - Close switched the panel off with no external monitor to show the session
+  - Open replayed a rule without `disabled = false`, so the panel stayed off
+  - `lua/laptop-lid.lua`, the sample that bound them, is now a pointer only
+- `scripts/LayoutKeybindDispatch.sh` and `scripts/LuaCycleWindow.sh`
+  - Both are replaced by in-process actions in `lua/window_actions.lua`
+  - `docs/Keybinds.md` names the in-process actions instead of the scripts
+- `scripts/keybinds_parser.py`
+  - 528 lines of regex that read the keybind files as text
+  - `lua/keybind_index.lua` records every `hl.bind()` in the Lua VM instead
+  - `KeyBinds.sh` asks that module to re-render the list before every run
+  - No `python3`, no file parsing, and no list left behind by a live change
+
+---
+
+## v2.3.27.7
+
+## Fixed:
+
+- Hyprview layout menu was almost twice as wide as it needed to be
+  - Width override added in `select-hyprview-layout.sh`
+- `configs/system_keybinds.lua` was out of sync with the `lua/` template
+- `cursor:no_hardware_cursors` now defaults to 2 (auto) in `lua/settings.lua`
+  - NVIDIA and hybrid systems set 1, VMs set 1 in `lib_detect.sh`
+- Keybinds that used legacy dispatcher names silently did nothing
+  - Since 0.55 the old hyprlang dispatcher names are not Lua globals, so `hyprctl dispatch resizeactive -50 0` evaluates to `hl.dispatch(resizeactive -50 0)` and errors, while the `hl.dsp.exec_raw("resizeactive -50 0")` path spawned a process named `resizeactive`, which does not exist - both were silent failures
+  - Affected `SUPER SHIFT + arrow` (resize), `SUPER ALT + arrow` (swap), `SUPER CTRL + F9..F12` (move workspace to monitor), `ALT + Tab` (bring to top), `SUPER CTRL + J/L/H` (group move) and `SUPER + M` (`splitratio`)
+  - Resize and swap now bind native dispatcher objects directly (`hl.dsp.window.resize({ ..., relative = true })` and `hl.dsp.window.swap({ direction })`), the rest get explicit `hl.dsp.*` handlers, and `raw_dispatch_cmd` falls back to `hyprctl dispatch` instead of `hl.dsp.exec_raw` in both `configs/system_keybinds.lua` and `lua/user_keybinds_helper.lua`
+- Hold-to-repeat keybinds never repeated
+  - The Lua bind option is `repeating`; `["repeat"] = true` is silently ignored, so volume, brightness and the resize binds fired once however long the key was held
+- Quick Settings could open a keybind file that Hyprland never loads
+  - `resolve_system_keybinds_file()` in `Kool_Quick_Settings.sh` preferred `lua/keybinds.lua`, an orphaned template that `hyprland.lua` does not load, so "Edit System Default Keybinds" edited a file with no effect; `KeyBinds.sh` also passed it to `keybinds_parser.py` first
+  - Both now resolve `configs/system_keybinds.lua` first, with `UserConfigs/system_keybinds.lua` and then the old template as last-resort fallbacks
+
+## Added:
+
+- `AGENTS.md` project rules for AI agents
+- `config/hypr/lua/window_actions.lua` - in-process replacements for the `float.all.samesize.lua` and `ScrollCycleColumnWidth.sh` helper scripts, with no `hyprctl` calls and no JSON parsing
+- `docs/LuaScriptsMigrationPlan.md` - the bash-to-Lua migration plan, verified API notes, work queue and agent handoff completion log
+
+## Removed:
+
+- Dead keybind helper scripts and the orphaned keybind template
+  - `scripts/ResizeActive.sh`, `scripts/LuaMoveWindowDirectional.sh`, `scripts/LuaFocusWorkspaceRelative.sh`, `scripts/LuaMoveWindowWorkspaceRelative.sh` and `scripts/LuaFullscreenMaximized.sh` had no live callers
+  - `scripts/LuaSwapWindow.sh` (bash + 2 `hyprctl` + a 25-line `jq` overlap test) is replaced by `hl.dsp.window.swap`, which is already a no-op when there is no window in that direction
+  - `scripts/float.all.samesize.lua` shelled out to `hyprctl` four times and carried a hand-rolled JSON decoder; it is now `lua/window_actions.lua` running inside Hyprland's Lua VM
+  - `scripts/LuaAutoReload.sh` is redundant: Hyprland reloads the Lua config automatically when a file is saved
+  - `lua/keybinds.lua` and `lua/keybind_helpers.lua` were never loaded by `hyprland.lua`; they duplicated `configs/system_keybinds.lua` and carried the same legacy-dispatcher bug
+
+## Update:
+
+- To make easier to find I updated descriptions for:
+  - waybar restart `SUPER ALT R`
+  - Hyprview `SUPER CTRL TAB`
+
+---
+
+## v2.3.27.6
+
+## Fixed:
+
+- `cursor:no_hardware_cursors` was never enabled, even on NVIDIA-only systems
+  - `scripts/lib_detect.sh` classifies GPUs from `lspci -k` output, and the AMD vendor match was `amd|advanced micro devices|ati`; the bare `ati` alternative matched the "ati" inside "compatible", and lspci describes every VGA device as "VGA compatible controller"
+  - So `has_amd` was 1 on any machine with a VGA device, the "Hybrid GPU detected" branch always won, and `no_hardware_cursors` was forced to 0 - it was never set to 1, so NVIDIA users never got the software-cursor workaround
+  - The vendor matches are now word-bounded (`\bintel\b`, `\b(amd|ati)\b|advanced micro devices`), so NVIDIA-only systems take the `no_hardware_cursors = 1` branch while genuine Intel/AMD + NVIDIA hybrids still get 0
+- Virtual machines lost the `no_hardware_cursors = 1` tweak
+  - `detect_vm_adjust()` only uncommented `WLR_RENDERER_ALLOW_SOFTWARE`; the Hyprlang version also forced `no_hardware_cursors` to 1 for VMs, and that step was dropped when the `.conf` targets were pruned
+  - Virtual GPUs (virtio, VMware, VirtualBox) mis-render hardware cursors, so the VM branch now sets `no_hardware_cursors = 1` like the NVIDIA path
+  - It runs after `detect_nvidia_adjust`, so a VM with a passed-through NVIDIA GPU ends up enabled as well
+
+---
+
+## v2.3.27.5
+
+## Fixed:
+
+- The Rainbow Borders mode was lost on logout
+  - The mode is stored in `~/.config/hypr/UserScripts/rainbow-borders.mode`, but nothing applied it at login, and `RainbowBorders.sh` is a one-shot
+  - `scripts/WallustSwww.sh` is the last writer of `general:col.active_border` on every wallpaper/theme change, so it replaced the rainbow border with the Wallust palette and the choice survived only until the next wallpaper change
+  - Added `config/hypr/scripts/RainbowBordersStartup.sh`, which reads the mode file and applies the matching script: `rainbow` / `wallust_random` / `gradient_flow` -> one-shot `RainbowBorders.sh`, `low_cpu` -> animated `RainbowBorders-low-cpu.sh` (stopping any previous instance first), `disabled` -> leaves the Wallust border alone
+  - It resolves a usable `WAYLAND_DISPLAY` / `HYPRLAND_INSTANCE_SIGNATURE` before calling `hyprctl` and detaches with `setsid`, so it works both from the login hook and from the wallpaper pass
+  - `WallustSwww.sh` calls it immediately after its own border write, `Refresh.sh` and `RefreshNoWaybar.sh` delegate to it instead of their own inline Rainbow Borders blocks, and `startup.lua` calls it once for a login where no wallpaper resolves
+  - One implementation, so the callers cannot drift apart; with no mode file a present `RainbowBorders.sh` still enables rainbow borders, matching the Quick Settings detection
+- Startup commands could run before the session was usable
+  - `exec_once` waited only for the Wayland socket and for a Hyprland socket file to exist, but the socket appears before Hyprland has finished coming up, so clients could initialise against a compositor with no outputs yet
+  - The readiness gate now also waits for `hyprctl -j monitors` to report at least one output (bounded), replacing the ad-hoc `sleep N` that startup commands needed to work around this
+  - Commands are now spawned through `hl.exec_cmd` - the same path the native `exec-once` used - instead of `os.execute`, so GUI clients, tray applets and D-Bus services get the session environment, a clean signal mask and their own session; `&` / `disown` are no longer needed, and the wrapper no longer relies on a login shell (`sh -lc` -> `sh -c`)
+  - The per-session marker check uses `test -e`, not `[ -e ... ]`: `hl.exec_cmd` hands the command to Hyprland's exec path, which glob-expands the string, and an unquoted `[` is a character-class glob - so `[ -e <marker> ]` never evaluated as a test and every entry was silently skipped (no marker, no log, no command)
+    - Symptom: adding an entry to `UserConfigs/user_startup.lua` appeared to do nothing, and none of the system startup entries (`nm-applet`, `quickshell`, `hypridle`, clipboard watcher, ...) came up either
+  - `lua/startup.lua` no longer keeps its own copy of `exec_once`; both startup lists call the shared `lua/user_startup_helper.lua`, so the system and user lists cannot drift apart again
+- A terminal autostarted from `UserConfigs/user_startup.lua` could be hidden on the special workspace at login
+  - `scripts/Dropterminal.sh --startup kitty` spawns its dropdown and then polls for the window to adopt; when no `kitty-dropterm` window had mapped yet it fell back to "whichever window appeared since launch" - an address set-difference with no class filter
+  - At login that fallback ran while the user's own `kitty` entry was starting, so it adopted the plain kitty window, recorded it as the dropdown terminal and moved it to `special:scratchpad`, which looked exactly like the entry never ran
+  - The fallback now only accepts a window whose class (or initial class) matches the terminal that was launched - `kitty-dropterm` for kitty, the binary name for anything else - so the plain `kitty` window is left where it opened
+
+## Updated:
+
+- `docs/HOWTO-Add-Apps-To-user_startup.lua` (English and Spanish): documents the readiness gate, the `hl.exec_cmd` spawn path, that `&` / `disown` are unnecessary, and that Rainbow Borders is a Quick Settings mode rather than a startup entry
+
+---
+
+## v2.3.27.4
+
+## Fixed:
+
+- `copy.sh` aborted an express/upgrade run when it was started with a shell other than bash
+  - Symptom: `adjust_qt_quick_controls_style:27: no matches found: /usr/lib/*-linux-gnu/qt*/qml`, after which the script exited before copying anything
+  - Root cause: `copy.sh` is bash-only (`BASH_SOURCE`, `shopt`, `[[ ]]`, arrays), but it can be launched as `zsh copy.sh --express-upgrade` (or `sh copy.sh` where `sh` is zsh), and zsh treats an unmatched glob as a fatal error (`nomatch`); the Qt QML probes in `adjust_qt_quick_controls_style()` only match on systems that ship those paths
+  - `copy.sh` now re-execs itself under bash whenever `BASH_VERSION` is unset, and exits with a clear message if bash is not on `PATH`
+  - The Qt QML probes in `scripts/lib_detect.sh` now expand to nothing when they match no path (`null_glob` under zsh, `nullglob` under bash, restored afterwards), so the optional directories are skipped instead of ending the run
+  - `config/hypr/scripts/Polkit.sh` carried the same unmatched-glob loop in its Kvantum fallback and was given the same treatment
+
+## Added:
+
+- Bluetooth icon for Blueman windows in the Waybar workspaces module
+  - `config/hypr/waybar/ModulesWorkspaces` now maps `blueman-manager` and `blueman-applet` to the Bluetooth icon; both previously fell through to `window-rewrite-default`
+  - The `blueman-manager` pattern is `[Bb]lueman-manager` so `blueman-manager` and `Blueman-manager` window classes both match, following the file's convention for other GTK apps such as `[Pp]avucontrol` and `[Ss]potify`
+
+## Removed:
+
+- Dead Hyprlang compatibility code left over from the Lua migration
+  - `config/hypr/lua/user_overrides.lua` no longer scans `UserConfigs/*.conf` (`WindowRules.conf`, `LayerRules.conf`) for active rules just to print a "not loaded in Lua mode" warning, and the now-unused `has_active_hyprlang_content()` helper went with it
+  - The legacy `UserConfigs/UserKeybinds.conf` importer - which replayed `bind`/`unbind` lines through `hyprctl keyword` when `user_keybinds.lua` was missing - is gone from both `config/hypr/lua/user_overrides.lua` and the shim that `scripts/migrate-hypr-to-lua.sh` generates
+
+---
+
 ## v2.3.27.3
 
 ## Fixed:
@@ -272,7 +1247,7 @@
 
 ---
 
-## v2.3.6.4
+## v2.3.26.4
 
 - Fixed:
   - Missing or incorrect Keybinds
@@ -288,7 +1263,7 @@
 
 ---
 
-## v2.3.6.3
+## v2.3.26.3
 
 ## Fixed:
 
@@ -1410,7 +2385,7 @@ Key Changes:
 
 ### 🌇 HyprSunset
 
-- 🔧 Availble from waybar or`SUPER + N`
+- 🔧 Available from waybar or`SUPER + N`
 
 ### 🖱️ Gestures
 

@@ -8,17 +8,7 @@
 # Scripts for refreshing ags, waybar, rofi, swaync, wallust
 
 SCRIPTSDIR=${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts
-UserScripts=${XDG_CONFIG_HOME:-$HOME/.config}/hypr/UserScripts
 QS_TEXTINPUT_LOG_RULE="qt.qpa.wayland.textinput.warning=false"
-
-# Define file_exists function
-file_exists() {
-  if [ -e "$1" ]; then
-    return 0 # File exists
-  else
-    return 1 # File does not exist
-  fi
-}
 
 # Kill already running processes (exclude waybar and swaync to avoid double reloads)
 _ps=(rofi ags)
@@ -82,6 +72,25 @@ ensure_wayland_env() {
   fi
 }
 
+# Ask the display-layout controller which Waybar config to run. With a
+# per-layout bar restriction in place that is a generated file; without the
+# feature installed, or if anything about it fails, this falls back to the plain
+# config so this script keeps working on its own.
+#
+# The fallback directory is passed in rather than read from a variable: this used
+# to rely on bash's dynamic scoping to see restart_waybar's `local waybar_dir`,
+# and a bare ${waybar_dir} expands to nothing - and then to "/config" - the moment
+# that stops being true.
+kooldots_waybar_config() {
+  local fallback_dir=$1
+  local dp="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/DisplayProfile.sh" p=""
+  if [ -x "$dp" ]; then
+    p="$("$dp" waybar-config 2>/dev/null | tail -n1 || true)"
+  fi
+  if [ -n "$p" ] && [ -f "$p" ]; then printf '%s\n' "$p"
+  else printf '%s\n' "$fallback_dir/config"; fi
+}
+
 # Restart waybar once, DETACHED from this script's cgroup.
 # This script is typically invoked from a waybar module on-click or keybind, so
 # it runs inside waybar.service's cgroup. Killing waybar from in there makes systemd tear
@@ -94,6 +103,15 @@ restart_waybar() {
   local waybar_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/waybar"
   local restart_cmd
 
+  # NixOS ships no /bin/bash, and systemd-run resolves its command against the
+  # user manager's PATH rather than this script's, so name the interpreter
+  # absolutely. BASH is the one already running this script, and falls back to
+  # a PATH lookup if it is somehow unset.
+  local bash_bin="${BASH:-}"
+  if [ -z "$bash_bin" ] || [ ! -x "$bash_bin" ]; then
+    bash_bin="$(command -v bash 2>/dev/null || printf '%s' bash)"
+  fi
+
   # WaybarStartup.sh owns the Waybar lifecycle and serializes every start and
   # restart on a shared flock (and also decides systemd-service vs direct
   # launch). Delegating here means concurrent Refresh.sh runs - for example the
@@ -102,7 +120,9 @@ restart_waybar() {
   if [ -x "$scripts_dir/WaybarStartup.sh" ]; then
     restart_cmd="\"$scripts_dir/WaybarStartup.sh\" --restart"
   else
-    restart_cmd="if command -v .waybar-wrapped >/dev/null 2>&1; then .waybar-wrapped -c \"$waybar_dir/config\" -s \"$waybar_dir/style.css\" >/dev/null 2>&1 & else waybar -c \"$waybar_dir/config\" -s \"$waybar_dir/style.css\" >/dev/null 2>&1 & fi"
+    local waybar_cfg
+    waybar_cfg="$(kooldots_waybar_config "$waybar_dir")"
+    restart_cmd="if command -v .waybar-wrapped >/dev/null 2>&1; then .waybar-wrapped -c \"$waybar_cfg\" -s \"$waybar_dir/style.css\" >/dev/null 2>&1 & else waybar -c \"$waybar_cfg\" -s \"$waybar_dir/style.css\" >/dev/null 2>&1 & fi"
   fi
 
   local unit_name="waybar-restart-$$-$RANDOM"
@@ -114,9 +134,9 @@ restart_waybar() {
       --setenv=XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
       --setenv=HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-}" \
       --setenv=WEATHER_UNITS="${WEATHER_UNITS:-}" \
-      /bin/bash -c "$restart_cmd" >/dev/null 2>&1 || setsid /bin/bash -c "$restart_cmd" >/dev/null 2>&1 &
+      "$bash_bin" -c "$restart_cmd" >/dev/null 2>&1 || setsid "$bash_bin" -c "$restart_cmd" >/dev/null 2>&1 &
   else
-    setsid /bin/bash -c "$restart_cmd" >/dev/null 2>&1 &
+    setsid "$bash_bin" -c "$restart_cmd" >/dev/null 2>&1 &
   fi
 }
 
@@ -141,21 +161,12 @@ if pgrep -x "nwg-dock-hyprla" >/dev/null 2>&1 || pgrep -x "nwg-dock-hyprland" >/
   "${SCRIPTSDIR}/Dock.sh" --restart >/dev/null 2>&1 &
 fi
 
-# Relaunching rainbow borders based on selected mode
+# Re-apply the selected Rainbow Borders mode. The single implementation lives
+# in RainbowBordersStartup.sh so this script, RefreshNoWaybar.sh and the
+# wallpaper pass cannot drift apart.
 sleep 1
-rainbow_mode_file="${UserScripts}/rainbow-borders.mode"
-rainbow_mode=""
-if [[ -f "$rainbow_mode_file" ]]; then
-  rainbow_mode="$(tr -d '[:space:]' <"$rainbow_mode_file")"
-fi
-if [[ "$rainbow_mode" == "low_cpu" ]]; then
-  pkill -f 'RainbowBorders-low-cpu\.sh' >/dev/null 2>&1 || true
-  rm -f /tmp/hypr-rainbowborders.lock >/dev/null 2>&1 || true
-  if file_exists "${UserScripts}/RainbowBorders-low-cpu.sh"; then
-    "${UserScripts}/RainbowBorders-low-cpu.sh" >/dev/null 2>&1 &
-  fi
-elif file_exists "${UserScripts}/RainbowBorders.sh"; then
-  "${UserScripts}/RainbowBorders.sh" &
+if [ -x "${SCRIPTSDIR}/RainbowBordersStartup.sh" ]; then
+  "${SCRIPTSDIR}/RainbowBordersStartup.sh" >/dev/null 2>&1 || true
 fi
 
 exit 0

@@ -89,6 +89,42 @@ show_info() {
   fi
 }
 
+check_lua_syntax() {
+  local target_file="$1"
+  [[ -n "$target_file" && "$target_file" == *.lua ]] || return 0
+  local filename
+  filename="$(basename "$target_file")"
+
+  if ! command -v luac >/dev/null 2>&1; then
+    if [[ -f "$iDIR/note.png" ]]; then
+      notify-send -u normal -t 5000 -i "$iDIR/note.png" "Lua Syntax Check" "luac not found can't run syntax check on $filename"
+    else
+      notify-send -u normal -t 5000 "Lua Syntax Check" "luac not found can't run syntax check on $filename"
+    fi
+    return 0
+  fi
+
+  local err_out
+  if err_out=$(luac -p "$target_file" 2>&1); then
+    if [[ -f "$iDIR/note.png" ]]; then
+      notify-send -u low -t 3000 -i "$iDIR/note.png" "Lua Syntax Check" "Syntax check passed for $filename"
+    else
+      notify-send -u low -t 3000 "Lua Syntax Check" "Syntax check passed for $filename"
+    fi
+  else
+    if [[ -f "$iDIR/error.png" ]]; then
+      notify-send -u critical -t 8000 -i "$iDIR/error.png" "Lua Syntax Error" "Failed syntax check on $filename:\n$err_out"
+    else
+      notify-send -u critical -t 8000 "Lua Syntax Error" "Failed syntax check on $filename:\n$err_out"
+    fi
+  fi
+}
+
+if [[ "${1:-}" == "--check-lua" ]]; then
+  check_lua_syntax "${2:-}"
+  exit 0
+fi
+
 get_context_monitor_name() {
   if ! command -v hyprctl >/dev/null 2>&1; then
     return 1
@@ -145,12 +181,18 @@ resolve_system_lua_file() {
 }
 
 resolve_system_keybinds_file() {
-  local lua_keybinds="$hypr_dir/lua/keybinds.lua"
-  local legacy_system_lua="$configs/system_keybinds.lua"
-  if [[ -f "$lua_keybinds" || ! -f "$legacy_system_lua" ]]; then
-    printf '%s' "$lua_keybinds"
-  else
+  # configs/system_keybinds.lua is the file Hyprland loads. The old
+  # lua/keybinds.lua template is NOT loaded, so it must never be offered for
+  # editing unless it is genuinely all that exists on an older install.
+  local canonical_system_lua="$configs/system_keybinds.lua"
+  local legacy_system_lua="$UserConfigs/system_keybinds.lua"
+  local old_template_lua="$hypr_dir/lua/keybinds.lua"
+  if [[ -f "$canonical_system_lua" ]]; then
+    printf '%s' "$canonical_system_lua"
+  elif [[ -f "$legacy_system_lua" ]]; then
     printf '%s' "$legacy_system_lua"
+  else
+    printf '%s' "$old_template_lua"
   fi
 }
 rainbow_mode_file() {
@@ -215,6 +257,25 @@ stop_lowcpu_rainbow() {
   pkill -f 'RainbowBorders-low-cpu\.sh' >/dev/null 2>&1 || true
 }
 
+# The classic script animates too, and both loops write
+# general:col.active_border, so switching effects has to stop the one that is
+# running. The classic script holds a PID lock, so a new instance would
+# otherwise exit on it and the effect would never change.
+stop_classic_rainbow() {
+  local lockfile="${RB_CLASSIC_LOCKFILE:-/tmp/hypr-rainbowborders-classic.lock}"
+  local oldpid=""
+  if [[ -f "$lockfile" ]]; then
+    oldpid="$(cat "$lockfile" 2>/dev/null || true)"
+    if [[ -n "${oldpid:-}" ]] && kill -0 "$oldpid" 2>/dev/null; then
+      kill "$oldpid" >/dev/null 2>&1 || true
+      sleep 0.1
+      kill -0 "$oldpid" 2>/dev/null && kill -9 "$oldpid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$lockfile" >/dev/null 2>&1 || true
+  fi
+  pkill -f 'RainbowBorders\.sh' >/dev/null 2>&1 || true
+}
+
 start_lowcpu_rainbow() {
   local lowcpu_script="$UserScripts/RainbowBorders-low-cpu.sh"
   if [[ ! -x "$lowcpu_script" ]]; then
@@ -226,8 +287,10 @@ start_lowcpu_rainbow() {
     show_info "RainbowBorders-low-cpu.sh not found in $UserScripts."
     return 1
   fi
+  # Only one loop may own the border; keep the classic script disabled too so
+  # Refresh won't overwrite this one.
+  stop_classic_rainbow
   stop_lowcpu_rainbow
-  # Animated loop; keep classic one-shot script disabled so Refresh won't overwrite.
   "$lowcpu_script" >/dev/null 2>&1 &
   return 0
 }
@@ -309,6 +372,7 @@ toggle_rainbow_borders() {
     fi
   else
     stop_lowcpu_rainbow
+    stop_classic_rainbow
     disable_classic_rainbow || true
     rainbow_write_mode "disabled"
     status="disabled"
@@ -347,25 +411,62 @@ rainbow_borders_menu() {
 
   # Map internal mode to friendly display
   local current_display="$current"
+  local active_option=""
   case "$current" in
-  wallust_random) current_display="Wallust Color" ;;
-  rainbow) current_display="Original Rainbow" ;;
-  gradient_flow) current_display="Gradient Flow" ;;
-  low_cpu) current_display="Low CPU Rainbow" ;;
-  disabled) current_display="Disabled" ;;
+  wallust_random)
+    current_display="Wallust Color"
+    active_option="Wallust Color"
+    ;;
+  rainbow)
+    current_display="Original Rainbow"
+    active_option="Original Rainbow"
+    ;;
+  gradient_flow)
+    current_display="Gradient Flow"
+    active_option="Gradient Flow"
+    ;;
+  low_cpu)
+    current_display="Low CPU Rainbow"
+    active_option="Low CPU Rainbow"
+    ;;
+  disabled)
+    current_display="Disabled"
+    active_option="Disable Rainbow Borders"
+    ;;
   esac
 
-  # Build options and prompt
-  local options="Disable Rainbow Borders\nWallust Color\nOriginal Rainbow\nGradient Flow\nLow CPU Rainbow"
+  # Build options and mark the active one
+  local raw_options=(
+    "Disable Rainbow Borders"
+    "Wallust Color"
+    "Original Rainbow"
+    "Gradient Flow"
+    "Low CPU Rainbow"
+  )
+
+  local default_row=0
+  local MARKER="👉"
+  local menu_options=("${raw_options[@]}")
+  for i in "${!menu_options[@]}"; do
+    if [[ "${menu_options[i]}" == "$active_option" ]]; then
+      menu_options[i]="$MARKER ${menu_options[i]}"
+      default_row=$i
+      break
+    fi
+  done
+
   local choice
   "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/RofiFocusedWallpaperLink.sh" >/dev/null 2>&1 || true
-  choice=$(printf "%b" "$options" | rofi -i -dmenu -config "$rofi_theme" -mesg "Rainbow Borders: current = $current_display")
+  choice=$(printf "%s\n" "${menu_options[@]}" | rofi -i -dmenu -config "$rofi_theme" -mesg "Rainbow Borders: current = $current_display" -selected-row "$default_row")
 
   [[ -z "$choice" ]] && return
+
+  choice="${choice#"$MARKER "}"
 
   case "$choice" in
   "Disable Rainbow Borders")
     stop_lowcpu_rainbow
+    stop_classic_rainbow
     disable_classic_rainbow || true
     rainbow_write_mode "disabled"
     current="disabled"
@@ -382,6 +483,7 @@ rainbow_borders_menu() {
     esac
 
     stop_lowcpu_rainbow
+    stop_classic_rainbow
     if ! ensure_classic_rainbow_enabled; then
       show_info "RainbowBorders script not found in $UserScripts."
       return
@@ -427,10 +529,82 @@ rainbow_borders_menu() {
   # No notifications; mode is shown in the menu
 }
 
+# Submenu to choose which tool extracts the wallpaper palette.
+# (butterpal, wallust)
+palette_source_menu() {
+  local state_file refresh_script current
+  state_file="$(palette_source_state_file)"
+  refresh_script="$scriptsDir/WallustSwww.sh"
+  current="$(palette_source_current)"
+
+  # Map the resolved source onto the friendly label and the row to mark.
+  local current_display="Butterpal"
+  local active_option="Butterpal"
+  case "$current" in
+  wallust)
+    current_display="Wallust"
+    active_option="Wallust"
+    ;;
+  esac
+
+  # Build options and mark the active one
+  local raw_options=(
+    "Butterpal"
+    "Wallust"
+  )
+
+  local default_row=0
+  local MARKER="👉"
+  local menu_options=("${raw_options[@]}")
+  for i in "${!menu_options[@]}"; do
+    if [[ "${menu_options[i]}" == "$active_option" ]]; then
+      menu_options[i]="$MARKER ${menu_options[i]}"
+      default_row=$i
+      break
+    fi
+  done
+
+  local choice
+  "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/RofiFocusedWallpaperLink.sh" >/dev/null 2>&1 || true
+  choice=$(printf "%s\n" "${menu_options[@]}" | rofi -i -dmenu -config "$rofi_theme" -mesg "Wallpaper Palette: current = $current_display" -selected-row "$default_row")
+
+  [[ -z "$choice" ]] && return
+
+  choice="${choice#"$MARKER "}"
+
+  local selected=""
+  case "$choice" in
+  "Butterpal") selected="butterpal" ;;
+  "Wallust") selected="wallust" ;;
+  *) return ;;
+  esac
+
+  # Nothing to do when the row already in effect is picked again.
+  [[ "$selected" == "$current" ]] && return
+
+  if [[ "$selected" == "butterpal" ]] && ! command -v butterpal >/dev/null 2>&1; then
+    show_info "butterpal is not installed, so the palette source was left unchanged."
+    return
+  fi
+
+  mkdir -p "$(dirname "$state_file")"
+  printf '%s\n' "$selected" >"$state_file"
+
+  # Regenerate and reload so the change is visible at once. WallustSwww.sh
+  # owns the render and the Waybar/cava/border reloads, so this is the same
+  # path a wallpaper change takes.
+  if [[ -x "$refresh_script" ]]; then
+    "$refresh_script" >/dev/null 2>&1 &
+  fi
+
+  # No notifications; source is shown in the menu
+}
+
 handle_choice() {
   local choice="$1"
   local quick_settings_monitor="$2"
   local file=""
+  local qs_state_dir="" qs_discard="" qs_nwg_pid=""
 
   case "$choice" in
   "Manage User Defaults" | "Configure User Defaults" | "Set User Defaults")
@@ -496,6 +670,9 @@ handle_choice() {
       "$scriptsDir/sddm_wallpaper.sh" --normal
     fi
     ;;
+  # The same Quickshell deck SUPER W opens, in front of the rofi menu it falls
+  # back to, so both entry points reach one code path.
+  "Wallpaper Carousel") "$scriptsDir/QsWallpaper.sh select" ;;
   "Choose Kitty Terminal Theme") "$scriptsDir/Kitty_themes.sh" ;;
   "Choose Ghostty Terminal Theme") "$scriptsDir/Ghostty_themes.sh" ;;
   "Choose Wlogout Theme") "$scriptsDir/RofiWlogoutTheme.sh" ;;
@@ -503,12 +680,41 @@ handle_choice() {
   "Edit User Monitor config")
     file="$user_monitors_lua"
     ;;
-  "Configure Workspace Rules (nwg-displays)")
+  "Arrange Monitors (nwg-displays)")
     if ! command -v nwg-displays &>/dev/null; then
       notify-send -i "$iDIR/error.png" "E-R-R-O-R" "Install nwg-displays first"
       return
     fi
-    nwg-displays
+    # nwg-displays writes a hyprlang monitors.conf that this Lua config never
+    # reads, and it applies its own arrangement with `hyprctl reload` - which
+    # re-runs the Lua config and puts the STORED layout back on screen. So it is
+    # pointed at a discard path in the runtime state directory, and what it wrote
+    # is imported afterwards: that both applies the drag and persists it to
+    # UserConfigs/monitors.lua, which the Lua config DOES read.
+    #
+    # The path keeps its .conf suffix on purpose: nwg derives the Lua sibling it
+    # also writes from it (removesuffix(".conf") + ".lua"), and a path that does
+    # not end in .conf makes it fall back to ~/.config/hypr/monitors.lua instead.
+    qs_state_dir="${XDG_RUNTIME_DIR:-/tmp}/kooldots-display-profiles"
+    qs_discard="$qs_state_dir/nwg-monitors.discard.conf"
+    mkdir -p -- "$qs_state_dir"
+    rm -f -- "$qs_discard" "$qs_state_dir/nwg-monitors.discard.lua"
+    # Pause BEFORE the GUI starts, with our own PID: nwg's reload emits monitor
+    # events, and the watcher would re-apply the stored layout over the drag.
+    # Writing the pause file after the fork would leave that window open.
+    printf '%s\n' "$$" > "$qs_state_dir/pause"
+    nwg-displays -m "$qs_discard" 9>&- &
+    qs_nwg_pid=$!
+    printf '%s\n' "$qs_nwg_pid" > "$qs_state_dir/pause"
+    wait "$qs_nwg_pid" || true
+    rm -f -- "$qs_state_dir/pause"
+    if [[ -s $qs_discard ]] && grep -q '^[[:space:]]*monitor=' "$qs_discard" 2>/dev/null; then
+      "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/DisplayProfile.sh" import-nwg "$qs_discard" \
+        >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$qs_discard" "$qs_state_dir/nwg-monitors.discard.lua"
+    notify-send -i "$iDIR/ja.png" "Monitors" \
+      "To keep this arrangement: SUPER+ALT+D then 'Save current state as...'"
     ;;
   "GTK Settings (nwg-look)")
     if ! command -v nwg-look &>/dev/null; then
@@ -542,9 +748,11 @@ handle_choice() {
   "Choose Monitor Profiles") "$scriptsDir/MonitorProfiles.sh" ;;
   "Choose Rofi Themes") "$scriptsDir/RofiThemeSelector.sh" ;;
   "Search for Keybinds") "$scriptsDir/KeyBinds.sh" ;;
+  "Choose Palette Source") palette_source_menu ;;
   "Toggle Waybar Weather units"* | "Toggle Waybar Weather units (C/F)") "$scriptsDir/Toggle-weather-waybar-units.sh" ;;
   "Toggle Waybar Clock (12H/24H)") "$scriptsDir/ToggleWaybarTime.sh" ;;
   "Toggle Game Mode") "$scriptsDir/GameMode.sh" ;;
+  "Toggle Window Wobble"*) "$scriptsDir/ToggleWobble.sh" ;;
   "Rainbow Borders Mode") rainbow_borders_menu ;;
   *) return ;;
   esac
@@ -557,21 +765,28 @@ handle_choice() {
     selected_cmd=("${edit_cmd[@]}")
     [[ ${#visual_cmd[@]} -gt 0 ]] && selected_cmd=("${visual_cmd[@]}")
 
-    if is_tui_editor "${selected_cmd[@]}"; then
-      if [[ -x "$scriptsDir/LaunchTerminal.sh" ]]; then
-        "$scriptsDir/LaunchTerminal.sh" "$term" "${selected_cmd[*]} '$file'" >/dev/null 2>&1 &
-      elif command -v kitty >/dev/null 2>&1; then
-        kitty "${selected_cmd[@]}" "$file" >/dev/null 2>&1 &
-      elif command -v ghostty >/dev/null 2>&1; then
-        ghostty -e "${selected_cmd[@]}" "$file" >/dev/null 2>&1 &
-      elif command -v alacritty >/dev/null 2>&1; then
-        alacritty -e "${selected_cmd[@]}" "$file" >/dev/null 2>&1 &
-      elif command -v "${term_cmd[0]}" >/dev/null 2>&1; then
-        "${term_cmd[@]}" -e "${selected_cmd[@]}" "$file" >/dev/null 2>&1 &
+    (
+      if is_tui_editor "${selected_cmd[@]}"; then
+        if [[ -x "$scriptsDir/LaunchTerminal.sh" ]]; then
+          "$scriptsDir/LaunchTerminal.sh" "$term" "${selected_cmd[*]} '$file'; '$scriptsDir/Kool_Quick_Settings.sh' --check-lua '$file'"
+        elif command -v kitty >/dev/null 2>&1; then
+          kitty "${selected_cmd[@]}" "$file"
+          check_lua_syntax "$file"
+        elif command -v ghostty >/dev/null 2>&1; then
+          ghostty -e "${selected_cmd[@]}" "$file"
+          check_lua_syntax "$file"
+        elif command -v alacritty >/dev/null 2>&1; then
+          alacritty -e "${selected_cmd[@]}" "$file"
+          check_lua_syntax "$file"
+        elif command -v "${term_cmd[0]}" >/dev/null 2>&1; then
+          "${term_cmd[@]}" -e "${selected_cmd[@]}" "$file"
+          check_lua_syntax "$file"
+        fi
+      else
+        "${selected_cmd[@]}" "$file"
+        check_lua_syntax "$file"
       fi
-    else
-      "${selected_cmd[@]}" "$file" >/dev/null 2>&1 &
-    fi
+    ) >/dev/null 2>&1 &
   fi
 }
 
@@ -598,6 +813,56 @@ get_weather_units_label() {
   else
     echo "Metric (°C)"
   fi
+}
+
+get_wobble_label() {
+  # Delegated to the toggle script so the wobble parsing lives in exactly one
+  # place. --status is read-only and has no side effects, so it is safe to call
+  # every time a menu is drawn.
+  local script="$scriptsDir/ToggleWobble.sh"
+  local label=""
+
+  if [[ -x "$script" ]]; then
+    label="$("$script" --status 2>/dev/null)"
+  fi
+
+  printf '%s\n' "${label:-Unknown}"
+}
+
+get_palette_source_label() {
+  case "$(palette_source_current)" in
+  butterpal) printf 'Butterpal' ;;
+  wallust) printf 'Wallust' ;;
+  *) printf 'Unknown' ;;
+  esac
+}
+
+# Wallpaper palette source: butterpal, or wallust's own extraction.
+#
+# Delegated to WallustConfig.sh so the state-file path and the resolution
+# order (environment, then state file, then auto-detect) live in exactly one
+# place. It is sourced in a subshell so its globals - wallust_args and friends
+# - do not leak into this script.
+palette_source_state_file() {
+  local config="$scriptsDir/WallustConfig.sh"
+  local state_file=""
+
+  if [[ -f "$config" ]]; then
+    state_file="$(. "$config" >/dev/null 2>&1; wallust_palette_source_file)"
+  fi
+
+  printf '%s' "${state_file:-${XDG_STATE_HOME:-$HOME/.local/state}/hypr/palette_source}"
+}
+
+palette_source_current() {
+  local config="$scriptsDir/WallustConfig.sh"
+  local source=""
+
+  if [[ -f "$config" ]]; then
+    source="$(. "$config" >/dev/null 2>&1; printf '%s' "$palette_source")"
+  fi
+
+  printf '%s' "${source:-wallust}"
 }
 
 show_category_menu() {
@@ -639,11 +904,14 @@ EOF
   "[[ Toggle Options ]]")
     local weather_label
     weather_label="$(get_weather_units_label)"
+    local wobble_label
+    wobble_label="$(get_wobble_label)"
     options=$(
       cat <<EOF
 Toggle Waybar Weather units [Current: $weather_label]
 Toggle Waybar Clock (12H/24H)
 Toggle Game Mode
+Toggle Window Wobble [Current: $wobble_label]
 EOF
     )
     ;;
@@ -652,11 +920,12 @@ EOF
       cat <<EOF
 Change Starship Prompt
 Set SDDM Wallpaper
+Wallpaper Carousel
 Choose Kitty Terminal Theme
 Choose Ghostty Terminal Theme
 Choose Wlogout Theme
 Choose Wlogout Wallpaper
-Configure Workspace Rules (nwg-displays)
+Arrange Monitors (nwg-displays)
 GTK Settings (nwg-look)
 QT Apps Settings (qt6ct)
 QT Apps Settings (qt5ct)
@@ -665,6 +934,7 @@ Choose Hyprland Animations
 Choose Monitor Profiles
 Choose Rofi Themes
 Search for Keybinds
+Choose Palette Source
 Rainbow Borders Mode
 EOF
     )
@@ -693,11 +963,13 @@ EOF
 show_main_menu() {
   local weather_label
   weather_label="$(get_weather_units_label)"
+  local wobble_label
+  wobble_label="$(get_wobble_label)"
   printf '%s\n' "[ Settings ]"
   printf '%b\n' "[[ User Settings ]]\x00meta\x1fManage User Defaults Edit User Defaults Edit User Keybinds Edit User ENV variables Edit User Startup Apps overlay Edit User Window Rules overlay Edit User Layer Rules overlay Edit User Settings Edit User Decorations Edit User Animations Edit User Laptop Settings Edit User Monitor config Select Hyprview Layout"
   printf '%b\n' "[[ System Settings ]]\x00meta\x1fEdit System Default Keybinds Edit System Default Startup Apps Edit System Default Window Rules Edit System Default Layer Rules Edit System Default Settings"
-  printf '%b\n' "[[ Toggle Options ]]\x00meta\x1fToggle Waybar Weather units C F Toggle Waybar Clock 12H 24H Toggle Game Mode"
-  printf '%b\n' "[[ Misc ]]\x00meta\x1fChange Starship Prompt Set SDDM Wallpaper Choose Kitty Terminal Theme Choose Ghostty Terminal Theme Choose Wlogout Theme Choose Wlogout Wallpaper Configure Workspace Rules nwg-displays GTK Settings nwg-look QT Apps Settings qt6ct QT Apps Settings qt5ct Set Hyprlock Wallpaper Choose Hyprland Animations Choose Monitor Profiles Choose Rofi Themes Search for Keybinds Rainbow Borders Mode"
+  printf '%b\n' "[[ Toggle Options ]]\x00meta\x1fToggle Waybar Weather units C F Toggle Waybar Clock 12H 24H Toggle Game Mode Toggle Window Wobble On Off"
+  printf '%b\n' "[[ Misc ]]\x00meta\x1fChange Starship Prompt Set SDDM Wallpaper Wallpaper Carousel Choose Kitty Terminal Theme Choose Ghostty Terminal Theme Choose Wlogout Theme Choose Wlogout Wallpaper Arrange Monitors nwg-displays GTK Settings nwg-look QT Apps Settings qt6ct QT Apps Settings qt5ct Set Hyprlock Wallpaper Choose Hyprland Animations Choose Monitor Profiles Choose Rofi Themes Search for Keybinds Choose Palette Source Rainbow Borders Mode"
   printf '%s\n' "[ Quick Links]"
   printf '%s\n' "Manage User Defaults"
   printf '%s\n' "Set User Keybinds"
@@ -724,13 +996,15 @@ show_main_menu() {
   printf '%s\n' "Toggle Waybar Weather units [Current: $weather_label]"
   printf '%s\n' "Toggle Waybar Clock (12H/24H)"
   printf '%s\n' "Toggle Game Mode"
+  printf '%s\n' "Toggle Window Wobble [Current: $wobble_label]"
   printf '%s\n' "Change Starship Prompt"
   printf '%s\n' "Set SDDM Wallpaper"
+  printf '%s\n' "Wallpaper Carousel"
   printf '%s\n' "Choose Kitty Terminal Theme"
   printf '%s\n' "Choose Ghostty Terminal Theme"
   printf '%s\n' "Choose Wlogout Theme"
   printf '%s\n' "Choose Wlogout Wallpaper"
-  printf '%s\n' "Configure Workspace Rules (nwg-displays)"
+  printf '%s\n' "Arrange Monitors (nwg-displays)"
   printf '%s\n' "GTK Settings (nwg-look)"
   printf '%s\n' "QT Apps Settings (qt6ct)"
   printf '%s\n' "QT Apps Settings (qt5ct)"
@@ -739,6 +1013,7 @@ show_main_menu() {
   printf '%s\n' "Choose Monitor Profiles"
   printf '%s\n' "Choose Rofi Themes"
   printf '%s\n' "Search for Keybinds"
+  printf '%s\n' "Choose Palette Source"
   printf '%s\n' "Rainbow Borders Mode"
 }
 
@@ -772,6 +1047,15 @@ main() {
 # Check if rofi is already running
 if pidof rofi >/dev/null; then
   pkill rofi
+fi
+
+# Direct entry point for the Rainbow Borders mode menu (SUPER SHIFT B), so the
+# menu is one keypress away instead of main menu -> [[ Misc ]]. It calls the
+# same rainbow_borders_menu the main menu reaches, so the mode marker and the
+# apply path cannot drift between the two entry points.
+if [[ "${1:-}" == "--rainbow-borders" ]]; then
+  rainbow_borders_menu
+  exit 0
 fi
 
 main

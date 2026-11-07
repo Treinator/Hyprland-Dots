@@ -18,10 +18,15 @@ detect_nvidia_adjust() {
   if echo "$pci_info" | grep -iq nvidia; then
     has_nvidia=1
   fi
-  if echo "$pci_info" | grep -iq intel; then
+  # Word boundaries matter here: lspci calls VGA devices "VGA compatible
+  # controller", and a bare `ati` alternative matches the "ati" inside
+  # "compatible", which made has_amd=1 on every machine with a VGA device. It no
+  # longer changes the value written below - every NVIDIA path writes 1 - but it
+  # still picks the wrong log line, so the bounds stay.
+  if echo "$pci_info" | grep -Eiq '\bintel\b'; then
     has_intel=1
   fi
-  if echo "$pci_info" | grep -Eiq 'amd|advanced micro devices|ati'; then
+  if echo "$pci_info" | grep -Eiq '\b(amd|ati)\b|advanced micro devices'; then
     has_amd=1
   fi
   if [ "$has_nvidia" -eq 1 ]; then
@@ -34,10 +39,11 @@ detect_nvidia_adjust() {
     fi
     if [ "$has_intel" -eq 1 ] || [ "$has_amd" -eq 1 ]; then
       echo "${INFO:-[INFO]} Hybrid GPU detected (Intel/NVIDIA or AMD/NVIDIA). Applying cursor handoff fixes." 2>&1 | tee -a "$log" || true
-      [ -f config/hypr/lua/settings.lua ] && sed -i -E 's/^([[:space:]]*no_hardware_cursors[[:space:]]*=[[:space:]]*)[0-9]+/\1 0/' config/hypr/lua/settings.lua
-    else
-      [ -f config/hypr/lua/settings.lua ] && sed -i -E 's/^([[:space:]]*no_hardware_cursors[[:space:]]*=[[:space:]]*)[0-9]+/\1 1/' config/hypr/lua/settings.lua
     fi
+    # 1 = don't use hardware cursors. NVIDIA needs software cursors, hybrids
+    # included: the cursor plane has to be handed between the iGPU and the dGPU,
+    # and that handoff is what users see as a stuck or corrupt cursor.
+    [ -f config/hypr/lua/settings.lua ] && sed -i -E 's/^([[:space:]]*no_hardware_cursors[[:space:]]*=[[:space:]]*)[0-9]+/\1 1/' config/hypr/lua/settings.lua
   fi
 }
 
@@ -47,6 +53,11 @@ detect_vm_adjust() {
   if hostnamectl | grep -q 'Chassis: vm'; then
     echo "${INFO:-[INFO]} System is running in a virtual machine. Setting up proper env's and configs" 2>&1 | tee -a "$log" || true
     [ -f config/hypr/lua/env.lua ] && sed -i 's/^--[[:space:]]*hl\.env("WLR_RENDERER_ALLOW_SOFTWARE"/hl.env("WLR_RENDERER_ALLOW_SOFTWARE"/' config/hypr/lua/env.lua
+    # Software cursors, like the NVIDIA path: virtual GPUs (virtio, VMware,
+    # VirtualBox) mis-render hardware cursors, so enable no_hardware_cursors.
+    # Runs after detect_nvidia_adjust, so a passed-through NVIDIA GPU in a VM
+    # ends up enabled here too.
+    [ -f config/hypr/lua/settings.lua ] && sed -i -E 's/^([[:space:]]*no_hardware_cursors[[:space:]]*=[[:space:]]*)[0-9]+/\1 1/' config/hypr/lua/settings.lua
   fi
 }
 
@@ -66,6 +77,17 @@ adjust_qt_quick_controls_style() {
   local qt_style_override="Fusion"
   local has_kvantum_qml=0
   local set_env_lua_vars
+  local _restore_nullglob=0
+
+  # The Qt QML probe patterns below are all optional paths, so an unmatched
+  # glob must expand to nothing instead of aborting the script. zsh aborts by
+  # default (`nomatch`); bash can be configured to as well (`failglob`).
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    setopt local_options null_glob 2>/dev/null || true
+  elif [ -n "${BASH_VERSION:-}" ] && ! shopt -q nullglob 2>/dev/null; then
+    shopt -s nullglob 2>/dev/null || true
+    _restore_nullglob=1
+  fi
 
   set_env_lua_vars() {
     local file="$1"
@@ -132,6 +154,10 @@ adjust_qt_quick_controls_style() {
     echo "${INFO:-[INFO]} Kvantum QML module detected. Using QT_STYLE_OVERRIDE=kvantum" 2>&1 | tee -a "$log" || true
   else
     echo "${WARN:-[WARN]} Kvantum QML module not found. Using QT_STYLE_OVERRIDE=Fusion as fallback." 2>&1 | tee -a "$log" || true
+  fi
+
+  if [ "$_restore_nullglob" -eq 1 ]; then
+    shopt -u nullglob 2>/dev/null || true
   fi
 }
 

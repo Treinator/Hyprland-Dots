@@ -11,7 +11,7 @@ hl.config({
   input = {
     kb_layout = "us",
     kb_variant = "",
-    kb_model = "pc105",
+    kb_model = "",
     kb_options = "",
     kb_rules = "",
     repeat_rate = 50,
@@ -39,15 +39,24 @@ hl.config({
   },
 })
 
--- Example:
+-- Multi-language example:
+-- NOTE: If specifying multiple layouts in kb_layout, kb_variant must have matching
+-- comma separators (e.g. kb_layout = "fr,de", kb_variant = "azerty," or kb_variant = "").
+--
 -- hl.config({
---   general = {
---     gaps_in = 4,
---     gaps_out = 8,
---     border_size = 1,
+--   input = {
+--     kb_layout = "fr,de",
+--     kb_variant = "azerty,",
+--     kb_options = "grp:alt_shift_toggle",
+--   },
+--   misc = {
+--     focus_on_activate = true,
 --   },
 -- })
---
+
+-- Window gaps, border size and the other `general`/`decoration` keys live in
+-- UserConfigs/user_decorations.lua, which is loaded after this file. A
+-- `general` table here would be overwritten when that file is applied.
 
 -- Disable cursor being centered when swap workspaces
 --

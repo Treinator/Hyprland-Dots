@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+# ==================================================
+#  KoolDots (2026)
+#  Project URL: https://github.com/LinuxBeginnings
+#  License: GNU GPLv3
+#  SPDX-License-Identifier: GPL-3.0-or-later
+# ==================================================
+# Reload the Hyprland config when a file the config loads is saved.
+#
+# Why this exists
+# ---------------
+# Hyprland's built-in autoreload (`misc:disable_autoreload = false`) watches the
+# one file it parsed: `~/.config/hypr/hyprland.lua`. Everything else the config
+# loads is reached through `dofile`, and Hyprland never sees those reads, so it
+# sets no watch on them. Measured on 0.56.2, with the `configreloaded>>` event
+# on `.socket2.sock` as the detector:
+#
+#   touch hyprland.lua                    -> 1 reload
+#   touch UserConfigs/user_keybinds.lua   -> 0 reloads
+#   touch configs/system_keybinds.lua     -> 0 reloads
+#   touch lua/settings.lua                -> 0 reloads
+#
+# So a user editing `UserConfigs/*.lua` - the files the docs tell them to edit -
+# saw no effect until they ran `hyprctl reload` by hand. This script closes that
+# gap: it watches the directories the config loads from and pokes the one file
+# Hyprland does watch, so the compositor re-reads the config through its own
+# reload path.
+#
+# This replaces scripts/LuaAutoReload.sh, which was retired on the assumption
+# that built-in autoreload covered the whole tree. That assumption was wrong;
+# LUA-008 in docs/LuaScriptsMigrationPlan.md now records the measurement.
+#
+# Design notes
+# ------------
+# * The trigger file is deliberately NOT inside the watched directories. The
+#   reload therefore produces no event this script can hear, which is what stops
+#   it from re-triggering itself.
+# * `inotifywait -m` feeds a FIFO rather than a pipeline. In `inotifywait | while
+#   read`, the shell is blocked on the pipeline and only runs a signal handler
+#   once inotifywait exits - which it never does on its own. That is why the
+#   retired watcher ignored SIGTERM on its polling path.
+# * Saves are debounced. An editor that writes a file several times in a row, or
+#   a save that arrives as create-then-rename, produces one reload.
+# * A write that leaves the bytes unchanged is not a save and does not reload.
+#   DisplayProfile.sh rewrites UserConfigs/monitors.lua on every apply, and the
+#   `configreloaded` that follows makes MonitorWatcher re-apply a named layout,
+#   which rewrites the same bytes again with a new mtime. Reloading for that
+#   re-enters MonitorWatcher through `configreloaded`, so the session reloaded
+#   every ~2s. Only the content can tell such a write from a real save, so the
+#   content of each watched file is cached and compared before the reload.
+# * An inotify watch follows the inode, not the path. `copy.sh` backs the config
+#   up and copies a new tree in on every dots upgrade, so the watched
+#   directories are deleted and recreated under a running watcher: the watches
+#   then point at inodes that no longer exist, `inotifywait` stays alive and
+#   reports nothing, and the watcher looks healthy while hearing nothing for the
+#   rest of the session. The inode of each watched directory is recorded when
+#   the watches are armed and re-checked on the tick, and re-arming reconciles
+#   every watched file against the cache, so a save made during the blind window
+#   is still applied.
+# * No `set -e`: a transient failure (inotify limit reached, a watched directory
+#   removed mid-session) must not end the watcher for the rest of the session.
+
+set -uo pipefail
+
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+hypr_dir="$config_home/hypr"
+entrypoint="$hypr_dir/hyprland.lua"
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+pidfile="$runtime_dir/kooldots-lua-config-watch.pid"
+fifo="$runtime_dir/kooldots-lua-config-watch.fifo"
+log="$runtime_dir/kooldots-lua-config-watch.log"
+# Per-file content hashes, so a rewrite that changed nothing is not a change.
+hash_dir="$runtime_dir/kooldots-lua-config-watch.hashes"
+
+# Exactly the directories lua/user_overrides.lua loads from. The config home
+# itself is not watched, so the trigger file below can never feed back in.
+watch_dirs=()
+for rel_dir in lua configs UserConfigs; do
+  [ -d "$hypr_dir/$rel_dir" ] && watch_dirs+=("$hypr_dir/$rel_dir")
+done
+[ "${#watch_dirs[@]}" -gt 0 ] || exit 0
+
+# Only `.lua` files are loaded from these directories. Everything else in them
+# (kitty themes, LegacyConfigs, wallust output) is not config, and reloading for
+# it would be pure churn.
+lua_re='\.lua$'
+
+debounce=0.25
+max_debounce_events=8
+watcher_pid=""
+changed_files=()
+# Inode of each watched directory as of the last arm. Compared on the tick,
+# which costs one `stat` per tick and nothing per event.
+dir_ids=""
+armed=0
+
+log_line() {
+  printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >>"$log" 2>/dev/null || true
+}
+
+notify_problem() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -e -u normal "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# --- the reload itself ------------------------------------------------------
+
+# `hyprctl getoption` prints `bool: <value>` followed by `set: <value>`.
+autoreload_disabled() {
+  local out
+  out="$(hyprctl getoption misc:disable_autoreload 2>/dev/null || true)"
+  case "$out" in
+  *"bool: true"*) return 0 ;;
+  *"bool: false"*) return 1 ;;
+  esac
+  # Unreadable: the entrypoint poke would be a silent no-op, so use the IPC call.
+  return 0
+}
+
+use_entrypoint=0
+if [ -f "$entrypoint" ] && ! autoreload_disabled; then
+  use_entrypoint=1
+fi
+
+trigger_reload() {
+  if [ "$use_entrypoint" = 1 ]; then
+    # The entrypoint is the only path Hyprland watches, so saving it is what
+    # makes the compositor re-read every file the config loads. No IPC involved.
+    if touch "$entrypoint" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # Fallback, and the path used when built-in autoreload is switched off.
+  hyprctl reload >/dev/null 2>&1 || true
+}
+
+# A syntax error in a UserConfigs file is silent: user_overrides.lua loads those
+# files through `pcall`, so the file is skipped and only a WARN reaches the
+# Hyprland log. Say so out loud, rather than leaving the user to wonder why the
+# edit they just saved did nothing.
+check_syntax() {
+  local file="$1"
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  command -v luac >/dev/null 2>&1 || return 0
+  luac -p "$file" >/dev/null 2>&1 && return 0
+  log_line "syntax error: $file"
+  notify_problem "Lua syntax error" "$(basename "$file") was skipped - check the Hyprland log"
+}
+
+# --- content cache ----------------------------------------------------------
+# A write that leaves the bytes as they were is not a save, and reloading for it
+# is what closed the loop with MonitorWatcher: DisplayProfile.sh rewrites
+# UserConfigs/monitors.lua on every apply, and the `configreloaded` that follows
+# makes MonitorWatcher re-apply a named layout, which rewrites the same bytes
+# again. Every rewrite carries a fresh mtime, so only the content can tell it
+# from a real save. One hash file per watched path, keyed by the path itself.
+hash_file() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$file" 2>/dev/null | cut -d' ' -f1
+  else
+    cksum -- "$file" 2>/dev/null | tr ' ' '-'
+  fi
+}
+
+cache_file() {
+  local key
+  key="$(printf '%s' "$1" | cksum | awk '{ print $1 "-" $2 }')"
+  printf '%s/%s' "$hash_dir" "$key"
+}
+
+# content_changed <path>
+#   0: the bytes differ from the last ones seen, so this is a real save
+#   1: the bytes are identical, so there is nothing to reload for
+#   A missing or unreadable file is a change: a deletion must still reload.
+content_changed() {
+  local file="$1" hash cache cached
+  hash="$(hash_file "$file")" || return 0
+  [ -n "$hash" ] || return 0
+  cache="$(cache_file "$file")"
+  cached="$(cat -- "$cache" 2>/dev/null || true)"
+  [ "$hash" = "$cached" ] && return 1
+  printf '%s' "$hash" >"$cache" 2>/dev/null || true
+  return 0
+}
+
+# seed_hashes: adopt what is on disk at startup as the baseline, so a rewrite
+# that restores the content this session began with is ignored too.
+seed_hashes() {
+  local file
+  mkdir -p -- "$hash_dir" 2>/dev/null || return 0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    hash_file "$file" >"$(cache_file "$file")" 2>/dev/null || true
+  done < <(find "${watch_dirs[@]}" -type f -name '*.lua' 2>/dev/null)
+}
+
+record_change() {
+  local file="$1" existing
+  [ -n "$file" ] || return 0
+  for existing in ${changed_files[@]+"${changed_files[@]}"}; do
+    [ "$existing" = "$file" ] && return 0
+  done
+  changed_files+=("$file")
+}
+
+apply_changes() {
+  local file names="" skipped=0
+  for file in ${changed_files[@]+"${changed_files[@]}"}; do
+    if ! content_changed "$file"; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+    check_syntax "$file"
+    names="${names}${names:+, }$(basename "$file")"
+  done
+  if [ -z "$names" ]; then
+    # Every write in this batch left the bytes as they were: that is
+    # DisplayProfile.sh rewriting UserConfigs/monitors.lua after a reload, and
+    # reloading for it would re-enter MonitorWatcher and loop.
+    [ "$skipped" -gt 0 ] && log_line "ignored: ${skipped} unchanged file(s)"
+    return 0
+  fi
+  trigger_reload
+  log_line "reload after: $names"
+}
+
+# Coalesce a burst: keep draining until the event stream is quiet for $debounce,
+# capped so a pathological stream (a build writing .lua files in a loop) still
+# reloads instead of draining forever.
+settle() {
+  local extra drained=0
+  while [ "$drained" -lt "$max_debounce_events" ]; do
+    IFS= read -r -t "$debounce" extra || break
+    record_change "$extra"
+    drained=$((drained + 1))
+  done
+}
+
+# --- watch identity ---------------------------------------------------------
+
+record_watch_identity() {
+  dir_ids="$(stat -c '%i' "${watch_dirs[@]}" 2>/dev/null | tr '\n' ' ')"
+}
+
+# False once a watched directory has been deleted or replaced. A directory that
+# is gone entirely prints fewer ids than were recorded, so a removal is caught
+# as well as a replacement.
+watches_are_current() {
+  [ "$(stat -c '%i' "${watch_dirs[@]}" 2>/dev/null | tr '\n' ' ')" = "$dir_ids" ]
+}
+
+# Anything written while the watches were dead is invisible to inotify: those
+# events went to the old inodes. Compare every watched file against the cache so
+# a save made during that window is still applied, and so the content check that
+# guards against the MonitorWatcher loop still applies.
+reconcile() {
+  local file
+  changed_files=()
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    content_changed "$file" && record_change "$file"
+  done < <(find "${watch_dirs[@]}" -type f -name '*.lua' 2>/dev/null)
+  [ "${#changed_files[@]}" -gt 0 ] && apply_changes
+  return 0
+}
+
+# --- watching ---------------------------------------------------------------
+
+watch_with_inotify() {
+  rm -f "$fifo"
+  mkfifo "$fifo" 2>/dev/null || return 1
+
+  # `-m` keeps one watch set up for the session. Re-arming a one-shot watch in a
+  # loop leaves a gap on every iteration, and a save landing in that gap is lost.
+  inotifywait -m -q -r \
+    -e close_write,create,moved_to,delete \
+    --format '%w%f' --include "$lua_re" \
+    "${watch_dirs[@]}" >"$fifo" 2>/dev/null &
+  watcher_pid=$!
+  record_watch_identity
+  # Re-arming, not the first arm: pick up anything written while the previous
+  # watches were pointing at deleted inodes.
+  [ "$armed" = 1 ] && reconcile
+  armed=1
+
+  local event
+  while :; do
+    if IFS= read -r -t 5 event; then
+      changed_files=()
+      record_change "$event"
+      settle
+      apply_changes
+      continue
+    fi
+    # Bounded read, so there is a chance to notice inotifywait is gone (inotify
+    # limits, a watch that could not be established) and start it again.
+    kill -0 "$watcher_pid" 2>/dev/null || break
+    # A dots upgrade backs the config up and copies a new tree in, which
+    # replaces the watched directories. The live watches then point at deleted
+    # inodes and never fire again, so re-arm instead of trusting them.
+    if ! watches_are_current; then
+      log_line "watched directories were replaced - re-arming"
+      break
+    fi
+  done <"$fifo"
+
+  kill "$watcher_pid" 2>/dev/null
+  wait "$watcher_pid" 2>/dev/null
+  watcher_pid=""
+  rm -f "$fifo"
+  return 1
+}
+
+snapshot() {
+  find "${watch_dirs[@]}" -type f -name '*.lua' -printf '%p:%T@\n' 2>/dev/null | LC_ALL=C sort
+}
+
+# Fallback for a system without inotify-tools. Slower and it can only report
+# "something changed", but it keeps the same contract - the content check
+# included, so a rewrite that changed nothing does not reload here either.
+watch_with_polling() {
+  local previous current file
+  previous="$(snapshot)"
+  while :; do
+    # `sleep & wait` rather than a bare `sleep`: bash runs the signal handler as
+    # soon as the child is reaped, so a SIGTERM is not held for up to a second.
+    sleep 1 & wait $! 2>/dev/null
+    current="$(snapshot)"
+    [ "$current" = "$previous" ] && continue
+    previous="$current"
+    # An mtime moved, so something was written; only the content decides
+    # whether that was a save worth reloading for.
+    changed_files=()
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      content_changed "$file" && record_change "$file"
+    done < <(find "${watch_dirs[@]}" -type f -name '*.lua' 2>/dev/null)
+    if [ "${#changed_files[@]}" -eq 0 ]; then
+      log_line "ignored: content unchanged (polling)"
+      continue
+    fi
+    trigger_reload
+    log_line "reload after: change (polling)"
+  done
+}
+
+# --- main -------------------------------------------------------------------
+
+# Single instance, per user. Deliberately not keyed by the session signature:
+# this watcher does not talk to the IPC socket, so it keeps working across a
+# Hyprland restart - and a second copy would poke the entrypoint twice per save.
+if [ -f "$pidfile" ]; then
+  old_pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [ -n "$old_pid" ] && [ "$old_pid" != "$$" ] && kill -0 "$old_pid" 2>/dev/null; then
+    exit 0
+  fi
+fi
+printf '%d' "$$" >"$pidfile"
+
+cleanup() {
+  [ -n "$watcher_pid" ] && kill "$watcher_pid" 2>/dev/null
+  rm -f "$pidfile" "$fifo"
+  # Only ever this watcher's own cache directory.
+  [ "${hash_dir##*/}" = "kooldots-lua-config-watch.hashes" ] && rm -rf -- "$hash_dir"
+}
+trap cleanup EXIT
+trap 'exit 143' INT TERM
+
+: >"$log"
+seed_hashes
+
+if [ "$use_entrypoint" = 1 ]; then
+  log_line "watching ${watch_dirs[*]} (trigger: touch $(basename "$entrypoint"))"
+else
+  log_line "watching ${watch_dirs[*]} (trigger: hyprctl reload)"
+fi
+
+if command -v inotifywait >/dev/null 2>&1; then
+  while :; do
+    watch_with_inotify || sleep 1
+  done
+else
+  log_line "inotifywait not found - falling back to polling"
+  watch_with_polling
+fi

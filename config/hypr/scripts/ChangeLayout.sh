@@ -13,6 +13,12 @@ persist_layout_script="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/PersistWor
 layouts=(master dwindle scrolling monocle)
 quiet_mode=0
 
+# hypr_emit_event tells the event-driven Waybar layout module that a change
+# happened. It has no interval poll, so without this the label would only
+# refresh on the next socket event.
+# shellcheck source=HyprIPC.sh
+. "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/HyprIPC.sh"
+
 normalize_layout() {
   case "$1" in
   master | dwindle | scrolling | monocle)
@@ -139,24 +145,28 @@ is_ok_output() {
   [[ -z "$normalized" || "$normalized" == "ok" ]]
 }
 
+# The rule names the workspace and the layout, never the monitor. A layout is a
+# property of the workspace, not of the display it happened to be on, and binding
+# the monitor here pinned every workspace to whichever display it was on when its
+# layout last changed - which then contradicted the workspace -> display bindings
+# in the same file (issue #162). Hyprland merges this call into the rule the
+# workspace already has, so a monitor binding is left alone rather than dropped.
 set_workspace_layout_rule() {
   local target="$1"
-  local ws_json workspace_selector monitor_name output
-  local ws_escaped monitor_escaped target_escaped
+  local ws_json workspace_selector output
+  local ws_escaped target_escaped
 
   ws_json="$(get_active_workspace_json)"
   workspace_selector="$(get_workspace_selector "$ws_json" || true)"
-  monitor_name="$(get_monitor_name "$ws_json")"
 
-  if [[ -z "$workspace_selector" || -z "$monitor_name" ]]; then
+  if [[ -z "$workspace_selector" ]]; then
     echo "Unable to resolve active workspace context" >&2
     return 1
   fi
 
   ws_escaped="$(escape_lua_string "$workspace_selector")"
-  monitor_escaped="$(escape_lua_string "$monitor_name")"
   target_escaped="$(escape_lua_string "$target")"
-  output="$(hyprctl eval "hl.workspace_rule({ workspace = \"${ws_escaped}\", monitor = \"${monitor_escaped}\", layout = \"${target_escaped}\" })" 2>&1 || true)"
+  output="$(hyprctl eval "hl.workspace_rule({ workspace = \"${ws_escaped}\", layout = \"${target_escaped}\" })" 2>&1 || true)"
 
   if ! is_ok_output "$output"; then
     echo "$output" >&2
@@ -194,6 +204,7 @@ set_layout() {
   actual="$(wait_for_layout "$target")"
   if [[ "$actual" == "$target" ]]; then
     persist_current_workspace_layout "$target"
+    hypr_emit_event "kool:layout"
     if [[ "$quiet_mode" -eq 0 ]]; then
       notify-send -e -u low -i "$notif" " ${actual^} Layout · WS ${workspace_label}${monitor_name:+ @ ${monitor_name}}"
     fi
